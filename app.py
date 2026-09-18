@@ -1318,7 +1318,7 @@ st.markdown("""
 
 /* Üst bölümde yumuşak yeşil dekorasyon */
 .main .block-container {
-    padding-top: 2rem;
+    padding-top: .75rem;
     padding-bottom: 3rem;
     max-width: 1500px;
 }
@@ -1539,6 +1539,27 @@ hr {
     align-items: center;
     padding: 4px 8px 18px 8px;
 }
+
+/* Tüm modüllerde başlık satırını kompakt tut; sağ üst bilgilerin oluşturduğu
+   gereksiz dikey boşluğu kaldır. */
+.trex-compact-topbar {
+    min-height: 44px;
+    padding: 0 4px 8px !important;
+    gap: 18px;
+}
+.trex-compact-topbar .trex-hero-title { font-size: 1.08rem; }
+.trex-compact-topbar .trex-kicker { margin-top: 0 !important; font-size: .75rem; }
+.trex-compact-meta {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    color: #527463;
+    font-size: .68rem;
+    white-space: nowrap;
+}
+.trex-compact-meta b { color: #15563a; }
+@media (max-width: 900px) { .trex-compact-meta { display: none; } }
 
 .trex-kicker {
     color: #5c7668;
@@ -2184,59 +2205,30 @@ active_page_name, active_page_subtitle = module_page_info.get(
     ("MES", "Üretim Yönetim ve İzleme Platformu")
 )
 
-# Üst bilgi alanı. Ana sayfada KPI'ların üzerinde boşluk oluşmaması için
-# tarih/kullanıcı bilgisini yatay şeride alıp vardiya seçicisini tek satırda tutuyoruz.
+# Tüm modüllerde tek satırlık kompakt üst bilgi alanı kullanılır.
 active_shift_header = active_shift_name()
-if active_module == "🏠 Ana Sayfa":
-    header_left, header_right = st.columns([4.4, 1.25], vertical_alignment="center")
-    with header_left:
-        st.markdown(f"""
-        <div class="trex-topbar trex-home-topbar">
-            <div>
-                <div class="trex-hero-title">🏭 trex MES · {active_page_name}</div>
-                <div class="trex-kicker">{active_page_subtitle}</div>
-            </div>
-            <div class="trex-home-meta">
-                <span>📅 {datetime.now():%d %B %Y · %H:%M}</span>
-                <b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b>
-            </div>
+header_left, header_right = st.columns([4.4, 1.25], vertical_alignment="center")
+with header_left:
+    st.markdown(f"""
+    <div class="trex-topbar trex-compact-topbar">
+        <div>
+            <div class="trex-hero-title">🏭 trex MES · {active_page_name}</div>
+            <div class="trex-kicker">{active_page_subtitle}</div>
         </div>
-        """, unsafe_allow_html=True)
-    with header_right:
-        st.selectbox(
-            "Vardiya görünümü",
-            [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
-            key="shift_context",
-            label_visibility="collapsed",
-            help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
-        )
-else:
-    header_left, header_right = st.columns([3, 1])
-    with header_left:
-        st.markdown(f"""
-        <div class="trex-topbar">
-            <div>
-                <div class="trex-hero-title">🏭 trex MES · {active_page_name}</div>
-                <div class="trex-kicker">{active_page_subtitle}</div>
-            </div>
+        <div class="trex-compact-meta">
+            <span>📅 {datetime.now():%d %B %Y · %H:%M}</span>
+            <b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b>
         </div>
-        """, unsafe_allow_html=True)
-    with header_right:
-        st.markdown('<div style="font-size:.72rem;font-weight:750;color:#315847;margin:2px 0 2px;">Vardiya görünümü</div>', unsafe_allow_html=True)
-        st.selectbox(
-            "Vardiya görünümü",
-            [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
-            key="shift_context",
-            label_visibility="collapsed",
-            help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
-        )
-        st.markdown(
-            f'<div style="text-align:right;color:#315847;font-size:.86rem;'
-            f'padding-top:8px;">📅 {datetime.now():%d %B %Y &nbsp; %H:%M:%S}<br>'
-            f'<b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b><br>'
-            f'<span style="font-size:.78rem;">Rol: {ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")}</span></div>',
-            unsafe_allow_html=True
-        )
+    </div>
+    """, unsafe_allow_html=True)
+with header_right:
+    st.selectbox(
+        "Vardiya görünümü",
+        [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
+        key="shift_context",
+        label_visibility="collapsed",
+        help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
+    )
 
 with st.sidebar:
     role_label = ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")
