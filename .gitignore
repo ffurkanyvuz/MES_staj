@@ -3,6 +3,7 @@ venv/
 
 # Gizli bilgiler
 .env
+.streamlit/secrets.toml
 
 # Python cache
 __pycache__/
@@ -12,4 +13,5 @@ __pycache__/
 *.log
 
 # Yerel SQLite veritabanları
-mes.dbmes_before_15day_cleanup_20260916.db
+mes.db
+mes_before_15day_cleanup_20260916.db

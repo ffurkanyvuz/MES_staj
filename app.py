@@ -29,11 +29,27 @@ except ImportError:
 INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + ((psycopg.IntegrityError,) if psycopg else ())
 
 DB = "mes.db"
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+
+def runtime_setting(name, default=""):
+    """Önce ortam değişkenini, sonra Streamlit Secrets değerini okur."""
+    environment_value = os.environ.get(name, "").strip()
+    if environment_value:
+        return environment_value
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        return default
+
+
+DATABASE_URL = runtime_setting("DATABASE_URL")
 USING_POSTGRES = bool(DATABASE_URL)
 POSTGRES_CONNECTION_CACHE_VERSION = "autocommit-v2"
 API_URL = "http://127.0.0.1:8000"
-PUBLIC_APP_URL = "https://mild-testimonials-fighting-prot.trycloudflare.com"
+PUBLIC_APP_URL = runtime_setting(
+    "PUBLIC_APP_URL",
+    "https://mild-testimonials-fighting-prot.trycloudflare.com"
+).strip().rstrip("/")
 LOGO_PATH = "logo.png"
 LOGIN_LOGO_PATH = "login_logo.png"
 LOGIN_BACKGROUND_PATH = os.path.join("static", "login-factory-bg.png")
@@ -111,7 +127,7 @@ class PostgresConnection:
 
     def commit(self):
         self._active_connection().commit()
-        _cached_read.clear()
+        invalidate_data_caches()
 
     def close(self):
         # Bu sarmalayıcı kapatılsa da önbellekteki Neon bağlantısı açık kalır.
@@ -119,10 +135,20 @@ class PostgresConnection:
         pass
 
 
+def invalidate_data_caches():
+    cached_query = globals().get("_cached_read")
+    if cached_query is not None:
+        cached_query.clear()
+    for name in ("make_excel_report", "make_pdf_report", "default_password_accounts"):
+        report_builder = globals().get(name)
+        if report_builder is not None and hasattr(report_builder, "clear"):
+            report_builder.clear()
+
+
 class LocalConnection(sqlite3.Connection):
     def commit(self):
         super().commit()
-        _cached_read.clear()
+        invalidate_data_caches()
 
 
 def conn():
@@ -688,6 +714,22 @@ def verify_password(password, stored_hash):
         return False
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def default_password_accounts():
+    defaults = {
+        "admin": "Admin123!",
+        "operator": "Operator123!",
+        "maintenance": "Maintenance123!",
+        "quality": "Quality123!",
+    }
+    users = _read_query("SELECT username,password_hash FROM users WHERE is_active=1")
+    return [
+        str(row["username"])
+        for _, row in users.iterrows()
+        if row["username"] in defaults and verify_password(defaults[row["username"]], row["password_hash"])
+    ]
+
+
 def authenticate(username, password):
     user = q("""
         SELECT username, password_hash, role, full_name
@@ -734,6 +776,7 @@ NAV_LABELS = {
     "📦 Stok": "Stok", "🔎 Detay": "Makine Detayı", "📄 Raporlar": "Raporlar",
     "📺 Andon Ekranı": "Andon Panosu", "🔳 QR Makine": "QR Makine", "📜 Denetim Kaydı": "Denetim ve Yedekleme",
     "👥 Kullanıcı Yönetimi": "Kullanıcı ve Yetki", "📊 Veritabanı": "Veri ve Raporlama",
+    "🧠 Akıllı Analiz": "Akıllı Analiz",
 }
 
 
@@ -790,6 +833,7 @@ def target_forecast(machine_frame):
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def make_excel_report():
     output = io.BytesIO()
     tables = {
@@ -806,6 +850,7 @@ def make_excel_report():
     return output.getvalue()
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def make_pdf_report():
     machines = q("SELECT machine_code, production, target, status FROM machines ORDER BY machine_code")
     lines = ["trex MES - Operasyon Ozeti", f"Rapor tarihi: {datetime.now():%Y-%m-%d %H:%M}", ""]
@@ -2128,6 +2173,7 @@ module_page_info = {
     "🧰 Bakım Talebi": ("Bakım Talebi", "Operatör bakım talepleri ve atama süreci"),
     "📜 Denetim Kaydı": ("Denetim Kaydı", "Kullanıcı işlemleri ve yedekleme kayıtları"),
     "👥 Kullanıcı Yönetimi": ("Kullanıcı Yönetimi", "Admin için rol ve kullanıcı durumu düzenleme"),
+    "🧠 Akıllı Analiz": ("Akıllı Analiz", "Üretim, OEE ve bakım riskleri için karar desteği"),
 }
 active_module = st.session_state.get("selected_module", "🏠 Ana Sayfa")
 if not can_access_module(active_module):
@@ -2179,6 +2225,10 @@ with st.sidebar:
         f'<div style="font-size:.78rem;margin-top:2px;">Rol: <b>{role_label}</b></div></div>',
         unsafe_allow_html=True
     )
+    if is_admin():
+        unsafe_accounts = default_password_accounts()
+        if unsafe_accounts:
+            st.warning("Varsayılan şifre kullanan hesaplar: " + ", ".join(unsafe_accounts))
     # TREX kurumsal logo
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
@@ -2245,7 +2295,7 @@ with st.sidebar:
         "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE"],
         "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
         "KALİTE VE BAKIM": ["✅ Kalite", "🔧 Bakım", "📦 Stok"],
-        "YÖNETİM": ["🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
+        "YÖNETİM": ["🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
     }
     if "selected_module" not in st.session_state:
         st.session_state["selected_module"] = "🏠 Ana Sayfa"
@@ -4633,6 +4683,11 @@ if selected_module == "📦 Stok":
 
     if st.session_state.get("stock_new_open", False):
         stock_movement_dialog()
+
+
+if selected_module == "🧠 Akıllı Analiz":
+    from smart_analysis_panel import render_smart_analysis
+    render_smart_analysis(q)
 
 
     # =========================================================
