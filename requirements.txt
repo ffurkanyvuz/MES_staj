@@ -1,0 +1,10 @@
+streamlit
+pandas
+plotly
+requests
+openpyxl
+Pillow
+qrcode[pil]
+psycopg[binary]
+fastapi
+uvicorn[standard]
