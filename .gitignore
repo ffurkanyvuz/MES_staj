@@ -12,5 +12,4 @@ __pycache__/
 *.log
 
 # Yerel SQLite veritabanları
-mes.db
-mes_before_15day_cleanup_20260916.db
+mes.dbmes_before_15day_cleanup_20260916.db
