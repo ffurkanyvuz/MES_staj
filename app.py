@@ -2184,36 +2184,59 @@ active_page_name, active_page_subtitle = module_page_info.get(
     ("MES", "Üretim Yönetim ve İzleme Platformu")
 )
 
-# Üst bilgi alanı
-header_left, header_right = st.columns([3, 1])
-
-with header_left:
-    st.markdown(f"""
-    <div class="trex-topbar">
-        <div>
-            <div class="trex-hero-title">🏭 trex MES · {active_page_name}</div>
-            <div class="trex-kicker">{active_page_subtitle}</div>
+# Üst bilgi alanı. Ana sayfada KPI'ların üzerinde boşluk oluşmaması için
+# tarih/kullanıcı bilgisini yatay şeride alıp vardiya seçicisini tek satırda tutuyoruz.
+active_shift_header = active_shift_name()
+if active_module == "🏠 Ana Sayfa":
+    header_left, header_right = st.columns([4.4, 1.25], vertical_alignment="center")
+    with header_left:
+        st.markdown(f"""
+        <div class="trex-topbar trex-home-topbar">
+            <div>
+                <div class="trex-hero-title">🏭 trex MES · {active_page_name}</div>
+                <div class="trex-kicker">{active_page_subtitle}</div>
+            </div>
+            <div class="trex-home-meta">
+                <span>📅 {datetime.now():%d %B %Y · %H:%M}</span>
+                <b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b>
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with header_right:
-    active_shift_header = active_shift_name()
-    st.markdown('<div style="font-size:.72rem;font-weight:750;color:#315847;margin:2px 0 2px;">Vardiya görünümü</div>', unsafe_allow_html=True)
-    st.selectbox(
-        "Vardiya görünümü",
-        [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
-        key="shift_context",
-        label_visibility="collapsed",
-        help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
-    )
-    st.markdown(
-        f'<div style="text-align:right;color:#315847;font-size:.86rem;'
-        f'padding-top:8px;">📅 {datetime.now():%d %B %Y &nbsp; %H:%M:%S}<br>'
-        f'<b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b><br>'
-        f'<span style="font-size:.78rem;">Rol: {ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")}</span></div>',
-        unsafe_allow_html=True
-    )
+        """, unsafe_allow_html=True)
+    with header_right:
+        st.selectbox(
+            "Vardiya görünümü",
+            [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
+            key="shift_context",
+            label_visibility="collapsed",
+            help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
+        )
+else:
+    header_left, header_right = st.columns([3, 1])
+    with header_left:
+        st.markdown(f"""
+        <div class="trex-topbar">
+            <div>
+                <div class="trex-hero-title">🏭 trex MES · {active_page_name}</div>
+                <div class="trex-kicker">{active_page_subtitle}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with header_right:
+        st.markdown('<div style="font-size:.72rem;font-weight:750;color:#315847;margin:2px 0 2px;">Vardiya görünümü</div>', unsafe_allow_html=True)
+        st.selectbox(
+            "Vardiya görünümü",
+            [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
+            key="shift_context",
+            label_visibility="collapsed",
+            help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
+        )
+        st.markdown(
+            f'<div style="text-align:right;color:#315847;font-size:.86rem;'
+            f'padding-top:8px;">📅 {datetime.now():%d %B %Y &nbsp; %H:%M:%S}<br>'
+            f'<b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b><br>'
+            f'<span style="font-size:.78rem;">Rol: {ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")}</span></div>',
+            unsafe_allow_html=True
+        )
 
 with st.sidebar:
     role_label = ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")
@@ -2506,6 +2529,16 @@ if selected_module == "🏠 Ana Sayfa":
     st.markdown("""
     <style>
     .mesv3-kpi{height:52px;border:1px solid #d6ece0;border-radius:7px;background:#fff;box-shadow:0 2px 8px rgba(6,81,43,.05);padding:6px 9px;display:flex;gap:7px;align-items:center}.mesv3-kpi-icon{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#087847;color:#fff;font-size:.72rem;flex:0 0 24px}.mesv3-kpi-title{font-size:.54rem;font-weight:850;color:#315f4a;text-transform:uppercase}.mesv3-kpi-value{font-size:1rem;font-weight:900;color:#103f2d;margin-top:1px}.mesv3-kpi-note{font-size:.51rem;color:#10a65e;margin-left:3px}.mesv3-box{background:#fff;border:1px solid #d8ede2;border-radius:7px;padding:9px 10px;box-shadow:0 2px 8px rgba(6,81,43,.045);box-sizing:border-box}.mesv3-box-title{font-size:.72rem;font-weight:900;color:#154f38;border-bottom:1px solid #e9f4ed;padding-bottom:6px;margin-bottom:7px}.mesv3-box-title small{float:right;color:#5d8b73;font-weight:700;font-size:.57rem}.mesv3-machine{border:1px solid #dcefe4;border-radius:6px;background:linear-gradient(135deg,#fff,#f4fcf7);padding:7px;min-height:112px}.mesv3-machine-head{display:flex;justify-content:space-between;align-items:center;color:#174d37;font-size:.66rem;font-weight:900}.mesv3-state{font-size:.52rem;border-radius:8px;padding:3px 4px;font-weight:800}.mesv3-running{background:#ddf7e6;color:#07843e}.mesv3-wait{background:#fff1d2;color:#a16600}.mesv3-fault{background:#ffe1e1;color:#b72828}.mesv3-machine-body{display:grid;grid-template-columns:42px 1fr;gap:5px;align-items:center;margin:8px 0}.mesv3-ring{width:38px;height:38px;border-radius:50%;background:conic-gradient(var(--c) calc(var(--v)*1%),#e7f0ea 0);position:relative}.mesv3-ring:after{content:"";position:absolute;inset:5px;background:#fff;border-radius:50%}.mesv3-ring b{position:absolute;z-index:2;inset:12px 0 0;text-align:center;font-size:.47rem;color:#184735}.mesv3-lines{font-size:.52rem;color:#5d796b;line-height:1.6}.mesv3-lines b{float:right;color:#1f513a}.mesv3-bar{height:5px;border-radius:5px;background:#dceee3;overflow:hidden;margin-top:4px}.mesv3-bar i{display:block;height:100%;border-radius:5px;background:#13aa60}.mesv3-foot{font-size:.5rem;color:#527666;border-top:1px solid #edf6f0;padding-top:5px}.mesv3-action{display:flex;align-items:flex-start;gap:7px;padding:8px 1px;border-bottom:1px solid #eaf4ee}.mesv3-action:last-child{border-bottom:0}.mesv3-dot{width:9px;height:9px;border-radius:50%;margin-top:2px;flex:0 0 9px}.mesv3-action-title{font-size:.6rem;font-weight:850;color:#1e513a}.mesv3-action-sub{font-size:.55rem;color:#638273;margin-top:2px}.mesv3-action-time{font-size:.54rem;color:#718c7f;margin-left:auto;white-space:nowrap}.mesv3-table{width:100%;border-collapse:collapse;font-size:.55rem;color:#315b48}.mesv3-table th{text-align:left;padding:5px 4px;color:#668475;border-bottom:1px solid #dceee3;font-size:.5rem}.mesv3-table td{padding:6px 4px;border-bottom:1px solid #edf5f0}.mesv3-pill{font-size:.49rem;font-weight:800;padding:3px 5px;border-radius:8px;white-space:nowrap}.mesv3-progress{height:5px;background:#e1efe6;border-radius:6px;overflow:hidden;min-width:38px}.mesv3-progress i{display:block;height:100%;background:#12a85d;border-radius:6px}.st-key-v3_quick_alarm button,.st-key-v3_quick_order button,.st-key-v3_quick_maintenance button,.st-key-v3_quick_report button{height:31px!important;min-height:31px!important;padding:4px 7px!important;font-size:.61rem!important;border-radius:5px!important;text-align:left!important;background:#fff!important;color:#135139!important;border-color:#d5ecdf!important}.st-key-v3_quick_alarm button{background:#087a47!important;color:#fff!important}.st-key-v3_quick_order button{background:#0b9154!important;color:#fff!important}.st-key-v3_quick_maintenance button{background:#0b7b4a!important;color:#fff!important}.mesv3-chart div[data-testid="stPlotlyChart"]{border:0!important;box-shadow:none!important;padding:0!important;background:transparent!important}
+    /* Ana sayfa üst şeridi ve KPI yerleşimi: boşluğu azalt, kartlara nefes ver. */
+    .trex-home-topbar{padding:0 4px 8px!important;min-height:44px;gap:18px}
+    .trex-home-topbar .trex-kicker{margin-top:0!important;font-size:.75rem}
+    .trex-home-topbar .trex-hero-title{font-size:1.08rem}
+    .trex-home-meta{margin-left:auto;display:flex;align-items:center;gap:14px;color:#527463;font-size:.68rem;white-space:nowrap}
+    .trex-home-meta b{color:#15563a}
+    .mesv3-kpi{height:58px!important;margin-bottom:8px!important;border-radius:9px!important;padding:7px 11px!important;gap:9px!important;box-sizing:border-box}
+    .mesv3-kpi-icon{width:27px!important;height:27px!important;flex-basis:27px!important;font-size:.76rem!important}
+    .mesv3-kpi-value{font-size:1.04rem!important}
+    @media(max-width:900px){.trex-home-meta{display:none}.mesv3-kpi{height:auto!important;min-height:58px}}
     </style>
     """, unsafe_allow_html=True)
     st.markdown("""<style>
