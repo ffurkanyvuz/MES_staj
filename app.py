@@ -3219,6 +3219,20 @@ if selected_module == "🏭 Makine":
 
 
 if selected_module == "📈 Üretim":
+    from production_panel import render_production_panel
+
+    render_production_panel(
+        q,
+        conn,
+        audit_event,
+        df,
+        selected_shift_context,
+        can_edit=has_role("admin", "operator"),
+    )
+
+
+# Önceki üretim ekranı geçiş sürecinde referans olarak korunuyor; çalıştırılmaz.
+if selected_module == "__legacy_production":
     st.subheader("📈 Üretim Takibi")
     st.caption(f"Vardiya bağlamı: {selected_shift_context if selected_shift_context != 'Tümü' else 'Tüm vardiyalar'}")
 
