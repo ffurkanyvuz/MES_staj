@@ -229,6 +229,168 @@ def audit_event(action, entity, details=""):
     )
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_notification_schema(database_identity, schema_version="notifications-v1"):
+    """Bildirim tablosunu SQLite ve PostgreSQL üzerinde güvenle oluşturur."""
+    connection = conn()
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS notifications(
+            id INTEGER PRIMARY KEY,
+            recipient_username TEXT,
+            recipient_role TEXT,
+            notification_type TEXT,
+            priority TEXT,
+            title TEXT,
+            message TEXT,
+            machine_code TEXT,
+            target_module TEXT,
+            entity_type TEXT,
+            entity_id INTEGER,
+            is_read INTEGER DEFAULT 0,
+            is_completed INTEGER DEFAULT 0,
+            created_at TEXT,
+            read_at TEXT,
+            completed_at TEXT
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_username,recipient_role,is_read)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_notifications_entity ON notifications(entity_type,entity_id)")
+    connection.commit()
+    connection.close()
+    return True
+
+
+def create_notification(*, recipient_username="", recipient_role="", notification_type="Görev",
+                        priority="Bilgi", title, message, machine_code="", target_module="🏠 Ana Sayfa",
+                        entity_type="", entity_id=0):
+    """Aynı görev ve alıcı için yinelenmeyen kalıcı bildirim oluşturur."""
+    recipient_username = str(recipient_username or "").strip()
+    recipient_role = str(recipient_role or "").strip()
+    existing = q("""
+        SELECT id FROM notifications
+        WHERE entity_type=? AND entity_id=?
+          AND COALESCE(recipient_username,'')=? AND COALESCE(recipient_role,'')=?
+        LIMIT 1
+    """, (entity_type, int(entity_id or 0), recipient_username, recipient_role))
+    if not existing.empty:
+        return int(existing.iloc[0]["id"])
+
+    connection = conn()
+    # SQLite ve PostgreSQL'de ortak çalışan, eşzamanlı oturumlarda çakışma
+    # olasılığı çok düşük bir sayısal kimlik kullanılır.
+    next_id = int(uuid.uuid4().int % 2_000_000_000) or 1
+    connection.execute("""
+        INSERT INTO notifications(
+            id,recipient_username,recipient_role,notification_type,priority,title,message,
+            machine_code,target_module,entity_type,entity_id,is_read,is_completed,created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        next_id, recipient_username, recipient_role, notification_type, priority, title, message,
+        machine_code, target_module, entity_type, int(entity_id or 0), 0, 0, now()
+    ))
+    connection.commit()
+    connection.close()
+    return next_id
+
+
+def sync_current_user_notifications():
+    """Mevcut görevlerden giriş yapan kullanıcıya uygun bildirimleri üretir."""
+    username = st.session_state.get("username", "")
+    role = st.session_state.get("role", "")
+    full_name = st.session_state.get("full_name", "")
+    if not username or not role:
+        return
+
+    if role == "operator":
+        assigned_orders = q("""
+            SELECT w.id,w.order_no,w.machine_code,w.product,w.priority,w.status,m.operator
+            FROM work_orders w JOIN machines m ON m.machine_code=w.machine_code
+            WHERE w.status NOT IN ('Tamamlandı','İptal')
+            ORDER BY w.id DESC LIMIT 12
+        """)
+        for _, item in assigned_orders.iterrows():
+            create_notification(
+                recipient_role="operator", notification_type="İş Emri",
+                priority="Kritik" if str(item["priority"]) == "Kritik" else "Görev",
+                title=f'{item["order_no"]} iş emri atandı',
+                message=f'{item["product"]} üretimi · Operatör: {item["operator"]} · Durum: {item["status"]}',
+                machine_code=item["machine_code"], target_module="📋 İş Emirleri",
+                entity_type="work_order", entity_id=item["id"]
+            )
+
+    if role == "maintenance":
+        assigned_requests = q("""
+            SELECT id,machine_code,request_type,description,priority,status,assigned_to
+            FROM maintenance_requests
+            WHERE status NOT IN ('Tamamlandı','İptal')
+            ORDER BY id DESC LIMIT 12
+        """)
+        for _, item in assigned_requests.iterrows():
+            create_notification(
+                recipient_role="maintenance", notification_type="Bakım",
+                priority="Kritik" if str(item["priority"]) == "Kritik" else "Görev",
+                title=f'{item["machine_code"]} bakım görevi',
+                message=f'{item["request_type"]} · {item["description"]} · Atanan: {item["assigned_to"] or "Bakım ekibi"}',
+                machine_code=item["machine_code"], target_module="🧰 Bakım Talebi",
+                entity_type="maintenance_request", entity_id=item["id"]
+            )
+
+        assigned_alarms = q("""
+            SELECT a.id,a.machine_code,a.alarm,a.level,x.assignee,x.status
+            FROM alarms a JOIN alarm_actions x ON x.alarm_id=a.id
+            WHERE a.acknowledged=0 AND x.assignee=? AND x.status NOT IN ('Çözüldü','Onaylandı')
+            ORDER BY a.id DESC LIMIT 10
+        """, (full_name,))
+        for _, item in assigned_alarms.iterrows():
+            create_notification(
+                recipient_username=username, notification_type="Alarm Ataması",
+                priority="Kritik" if str(item["level"]) == "Kritik" else "Uyarı",
+                title=f'{item["machine_code"]} alarmı size atandı',
+                message=f'{item["alarm"]} · Müdahale bekleniyor',
+                machine_code=item["machine_code"], target_module="🚨 Alarmlar",
+                entity_type="assigned_alarm", entity_id=item["id"]
+            )
+
+    if role in ("maintenance", "admin"):
+        critical_alarms = q("""
+            SELECT id,machine_code,alarm,level,time FROM alarms
+            WHERE acknowledged=0 AND level='Kritik' ORDER BY id DESC LIMIT 10
+        """)
+        for _, item in critical_alarms.iterrows():
+            create_notification(
+                recipient_role=role, notification_type="Acil Alarm", priority="Kritik",
+                title=f'ACİL · {item["machine_code"]}',
+                message=f'{item["alarm"]} · Makineye müdahale gerekiyor',
+                machine_code=item["machine_code"], target_module="🚨 Alarmlar",
+                entity_type="critical_alarm", entity_id=item["id"]
+            )
+
+    if role == "quality":
+        quality_tasks = q("""
+            SELECT id,machine_code,product,defective,defect_reason,timestamp FROM quality
+            WHERE defective>0 ORDER BY id DESC LIMIT 10
+        """)
+        for _, item in quality_tasks.iterrows():
+            create_notification(
+                recipient_role="quality", notification_type="Kalite Kontrol", priority="Uyarı",
+                title=f'{item["machine_code"]} kalite kontrolü',
+                message=f'{item["product"]} · {int(item["defective"])} hatalı · {item["defect_reason"]}',
+                machine_code=item["machine_code"], target_module="✅ Kalite",
+                entity_type="quality_record", entity_id=item["id"]
+            )
+
+
+def current_user_notifications(limit=12):
+    username = st.session_state.get("username", "")
+    role = st.session_state.get("role", "")
+    return q("""
+        SELECT * FROM notifications
+        WHERE (recipient_username=? OR recipient_role=?) AND is_completed=0
+        ORDER BY CASE priority WHEN 'Kritik' THEN 1 WHEN 'Uyarı' THEN 2 ELSE 3 END,
+                 created_at DESC, id DESC LIMIT ?
+    """, (username, role, int(limit)))
+
+
 def init_db():
     # Neon'a taşınmış şema ve veriler zaten hazırdır. Yerel SQLite ilk
     # kurulum ve yükseltme işlemleri yalnızca yerel modda çalışır.
@@ -425,6 +587,25 @@ def init_db():
         entity TEXT,
         details TEXT,
         timestamp TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications(
+        id INTEGER PRIMARY KEY,
+        recipient_username TEXT,
+        recipient_role TEXT,
+        notification_type TEXT,
+        priority TEXT,
+        title TEXT,
+        message TEXT,
+        machine_code TEXT,
+        target_module TEXT,
+        entity_type TEXT,
+        entity_id INTEGER,
+        is_read INTEGER DEFAULT 0,
+        is_completed INTEGER DEFAULT 0,
+        created_at TEXT,
+        read_at TEXT,
+        completed_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS user_permissions(
@@ -1301,6 +1482,11 @@ def initialize_local_database(database_path, schema_version):
 if not USING_POSTGRES:
     initialize_local_database(os.path.abspath(DB), "stability-v1")
 
+notification_database_identity = (
+    hashlib.sha256(DATABASE_URL.encode()).hexdigest() if USING_POSTGRES else os.path.abspath(DB)
+)
+ensure_notification_schema(notification_database_identity)
+
 
 # =========================================================
 # TREX YEŞİL - BEYAZ KURUMSAL TEMA
@@ -1559,6 +1745,26 @@ hr {
     white-space: nowrap;
 }
 .trex-compact-meta b { color: #15563a; }
+.st-key-notification_center button {
+    min-height: 38px !important;
+    border-radius: 10px !important;
+    border-color: #bfe5cf !important;
+    background: linear-gradient(135deg,#ffffff,#eaf8ef) !important;
+    color: #075337 !important;
+    font-weight: 850 !important;
+}
+.notification-card {
+    border: 1px solid #dbece3;
+    border-left: 4px solid var(--notification-color);
+    border-radius: 9px;
+    background: #fff;
+    padding: 9px 10px;
+    margin: 7px 0 4px;
+}
+.notification-card.unread { background: #f3fbf6; }
+.notification-card small { color:#71877b;font-size:.66rem; }
+.notification-card b { display:block;color:#123f2d;font-size:.78rem;margin:2px 0; }
+.notification-card span { color:#4d6a5c;font-size:.69rem;line-height:1.35;display:block; }
 @media (max-width: 900px) { .trex-compact-meta { display: none; } }
 
 .trex-kicker {
@@ -2207,7 +2413,24 @@ active_page_name, active_page_subtitle = module_page_info.get(
 
 # Tüm modüllerde tek satırlık kompakt üst bilgi alanı kullanılır.
 active_shift_header = active_shift_name()
-header_left, header_right = st.columns([4.4, 1.25], vertical_alignment="center")
+
+
+@st.fragment(run_every="20s")
+def notification_refresh_tick():
+    """Yeni görev geldiğinde üst çubuğu kullanıcı müdahalesi olmadan yeniler."""
+    sync_current_user_notifications()
+    latest_notifications = current_user_notifications()
+    latest_unread = int((latest_notifications["is_read"] == 0).sum()) if not latest_notifications.empty else 0
+    previous_unread = st.session_state.get("notification_unread_snapshot")
+    st.session_state["notification_unread_snapshot"] = latest_unread
+    if previous_unread is not None and previous_unread != latest_unread:
+        st.rerun(scope="app")
+
+
+notification_refresh_tick()
+header_notifications = current_user_notifications()
+unread_notification_count = int((header_notifications["is_read"] == 0).sum()) if not header_notifications.empty else 0
+header_left, header_shift, header_notification = st.columns([4.15, 1.25, .58], vertical_alignment="center")
 with header_left:
     st.markdown(f"""
     <div class="trex-topbar trex-compact-topbar">
@@ -2221,7 +2444,7 @@ with header_left:
         </div>
     </div>
     """, unsafe_allow_html=True)
-with header_right:
+with header_shift:
     st.selectbox(
         "Vardiya görünümü",
         [f"Aktif vardiya · {active_shift_header}", "Tümü", "Sabah", "Akşam", "Gece"],
@@ -2229,6 +2452,57 @@ with header_right:
         label_visibility="collapsed",
         help="Seçilen vardiyanın makine-operatör ataması tüm ekranlarda uygulanır."
     )
+with header_notification:
+    with st.popover(f"🔔 {unread_notification_count}", use_container_width=True):
+        st.markdown("**Bildirim Merkezi**")
+        st.caption("Size ve rolünüze atanmış güncel görevler")
+        if header_notifications.empty:
+            st.success("Yeni bildiriminiz yok.")
+        else:
+            current_username = st.session_state.get("username", "")
+            current_role = st.session_state.get("role", "")
+            if unread_notification_count and st.button("Tümünü okundu işaretle", use_container_width=True, key="notification_read_all"):
+                execute("""
+                    UPDATE notifications SET is_read=1,read_at=?
+                    WHERE is_read=0 AND (recipient_username=? OR recipient_role=?)
+                """, (now(), current_username, current_role))
+                st.rerun()
+            for _, notification in header_notifications.iterrows():
+                notification_id = int(notification["id"])
+                notification_priority = str(notification["priority"])
+                notification_color = "#e3474f" if notification_priority == "Kritik" else ("#efa72b" if notification_priority == "Uyarı" else "#159a63")
+                notification_state = "unread" if int(notification["is_read"] or 0) == 0 else ""
+                st.markdown(
+                    f'<div class="notification-card {notification_state}" style="--notification-color:{notification_color}">'
+                    f'<small>{html.escape(str(notification["notification_type"]))} · {html.escape(str(notification["created_at"]))}</small>'
+                    f'<b>{html.escape(str(notification["title"]))}</b>'
+                    f'<span>{html.escape(str(notification["message"]))}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                notification_actions = st.columns([1.15, .9, .9], gap="small")
+                if notification_actions[0].button("Göreve Git", key=f"notification_open_{notification_id}", use_container_width=True):
+                    execute("""
+                        UPDATE notifications SET is_read=1,read_at=?
+                        WHERE id=? AND (recipient_username=? OR recipient_role=?)
+                    """, (now(), notification_id, current_username, current_role))
+                    target_module = str(notification["target_module"] or "🏠 Ana Sayfa")
+                    st.session_state["selected_module"] = target_module if can_access_module(target_module) else "🏠 Ana Sayfa"
+                    if notification["machine_code"]:
+                        st.session_state["notification_machine_filter"] = str(notification["machine_code"])
+                    st.rerun()
+                if notification_actions[1].button("Okundu", key=f"notification_read_{notification_id}", use_container_width=True):
+                    execute("""
+                        UPDATE notifications SET is_read=1,read_at=?
+                        WHERE id=? AND (recipient_username=? OR recipient_role=?)
+                    """, (now(), notification_id, current_username, current_role))
+                    st.rerun()
+                if notification_actions[2].button("Tamamla", key=f"notification_done_{notification_id}", use_container_width=True):
+                    execute("""
+                        UPDATE notifications SET is_read=1,is_completed=1,read_at=?,completed_at=?
+                        WHERE id=? AND (recipient_username=? OR recipient_role=?)
+                    """, (now(), now(), notification_id, current_username, current_role))
+                    audit_event("Bildirimi tamamladı", f"Bildirim #{notification_id}", str(notification["title"]))
+                    st.rerun()
 
 with st.sidebar:
     role_label = ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")
@@ -2537,10 +2811,10 @@ if selected_module == "🏠 Ana Sayfa":
     .mesv3-machine-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
     .mesv3-machine-link{display:block;text-decoration:none!important;color:inherit!important;cursor:pointer}.mesv3-machine-link:hover .mesv3-machine{border-color:#10a75d;box-shadow:0 5px 14px rgba(4,120,65,.16);transform:translateY(-2px)}
     .mesv3-detail-close{float:right;text-decoration:none!important;color:#5b8270;font-size:1.1rem;line-height:1}.mesv3-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}.mesv3-detail-item{border:1px solid #e1f0e6;border-radius:5px;padding:6px;font-size:.56rem;color:#6a8779}.mesv3-detail-item b{display:block;margin-top:2px;color:#194c37;font-size:.63rem}
-    div[class*="st-key-v3_machine_button_"] button{min-height:106px!important;height:106px!important;white-space:pre-line!important;text-align:left!important;line-height:1.42!important;padding:10px 11px!important;border:1px solid #d8ebe1!important;border-radius:9px!important;background:linear-gradient(135deg,#fff,#f2fbf6)!important;color:#174d37!important;font-size:.64rem!important;font-weight:650!important;box-shadow:0 3px 9px rgba(6,81,43,.06)!important;align-items:flex-start!important;justify-content:flex-start!important;overflow:hidden!important}
-    div[class*="st-key-v3_machine_button_"] button p{display:block!important;width:100%!important;margin:0!important;white-space:pre-line!important;overflow:visible!important;text-overflow:clip!important;text-align:left!important;line-height:1.42!important;word-break:normal!important;overflow-wrap:anywhere!important;font-size:.64rem!important}
-    div[class*="st-key-v3_machine_button_"] button p strong{display:block!important;color:#083e2a!important;font-size:.76rem!important;margin-bottom:2px!important;letter-spacing:.01em!important}
-    div[class*="st-key-v3_machine_button_"] button:hover{border-color:#10a75d!important;box-shadow:0 5px 14px rgba(4,120,65,.16)!important;transform:translateY(-2px)}
+    div[class*="st-key-v3_machine_button_"] button{min-height:148px!important;height:148px!important;white-space:pre-line!important;text-align:left!important;line-height:1.48!important;padding:12px 13px!important;border:1px solid #d8ebe1!important;border-left:4px solid var(--machine-accent,#12a35d)!important;border-radius:12px!important;background:linear-gradient(145deg,#fff,#f3fbf7)!important;color:#315b49!important;font-size:.61rem!important;font-weight:650!important;box-shadow:0 4px 12px rgba(6,81,43,.075)!important;align-items:flex-start!important;justify-content:flex-start!important;overflow:hidden!important;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease!important}
+    div[class*="st-key-v3_machine_button_"] button p{display:block!important;width:100%!important;margin:0!important;white-space:pre-line!important;overflow:visible!important;text-overflow:clip!important;text-align:left!important;line-height:1.48!important;word-break:normal!important;overflow-wrap:anywhere!important;font-size:.61rem!important}
+    div[class*="st-key-v3_machine_button_"] button p strong{color:#083e2a!important;font-size:.78rem!important;letter-spacing:.01em!important}
+    div[class*="st-key-v3_machine_button_"] button:hover{border-color:var(--machine-accent,#10a75d)!important;box-shadow:0 8px 18px rgba(4,120,65,.16)!important;transform:translateY(-3px)}
     @media(max-width:900px){.mesv3-machine-grid{grid-template-columns:1fr}}
     </style>""", unsafe_allow_html=True)
     live_alarms_v3 = q("SELECT machine_code,alarm,level,time FROM alarms WHERE acknowledged=0 ORDER BY id DESC LIMIT 5")
@@ -2598,17 +2872,27 @@ if selected_module == "🏠 Ana Sayfa":
                         machine_status_icon_v3 = "🟢" if machine_status_v3 == "Çalışıyor" else ("🔴" if machine_status_v3 == "Arızalı" else "🟡")
                         machine_card_tint_v3 = "#eefaf3" if machine_status_v3 == "Çalışıyor" else ("#fff0f0" if machine_status_v3 == "Arızalı" else "#fff8e8")
                         machine_card_border_v3 = "#bfe7d0" if machine_status_v3 == "Çalışıyor" else ("#f1c2c2" if machine_status_v3 == "Arızalı" else "#efdcae")
+                        machine_accent_v3 = "#15a663" if machine_status_v3 == "Çalışıyor" else ("#e05258" if machine_status_v3 == "Arızalı" else "#eeb02e")
+                        progress_filled_v3 = min(max(round(machine_progress_v3 / 10), 0), 10)
+                        progress_bar_v3 = "●" * progress_filled_v3 + "○" * (10 - progress_filled_v3)
                         st.markdown(
-                            f'<style>div[class*="st-key-v3_machine_button_{machine["machine_code"]}"] button{{background:linear-gradient(135deg,#fff,{machine_card_tint_v3})!important;border-color:{machine_card_border_v3}!important}}</style>',
+                            f'<style>div[class*="st-key-v3_machine_button_{machine["machine_code"]}"] button{{background:linear-gradient(145deg,#fff,{machine_card_tint_v3})!important;border-color:{machine_card_border_v3}!important;--machine-accent:{machine_accent_v3}}}</style>',
                             unsafe_allow_html=True,
                         )
                         machine_label_v3 = (
                             f"**⚙ {machine['machine_code']}**\n"
-                            f"{machine_status_icon_v3} {machine_status_v3} · OEE %{machine_oee_v3:.1f}\n"
-                            f"Üretim {int(machine['production']):,} / {int(machine['target']):,} · %{machine_progress_v3:.0f}\n"
-                            f"👤 {machine['operator']}"
+                            f"{machine_status_icon_v3} **{machine_status_v3.upper()}**\n"
+                            f"📦 {machine['product']}\n"
+                            f"**{int(machine['production']):,} / {int(machine['target']):,}** adet · %{machine_progress_v3:.0f}\n"
+                            f"{progress_bar_v3}\n"
+                            f"OEE **%{machine_oee_v3:.1f}**  ·  👤 {machine['operator']}"
                         )
-                        if st.button(machine_label_v3, key=f"v3_machine_button_{machine['machine_code']}", use_container_width=True):
+                        if st.button(
+                            machine_label_v3,
+                            key=f"v3_machine_button_{machine['machine_code']}",
+                            use_container_width=True,
+                            help=f"{machine['machine_code']} makine detayını aç",
+                        ):
                             st.session_state["detail_machine_v2"] = machine["machine_code"]
                             st.session_state["selected_module"] = "🔎 Detay"
                             st.rerun()
@@ -4176,6 +4460,12 @@ if selected_module == "📡 Sensörler":
       .sensor-v3-status{font-size:.62rem;padding:3px 7px;border-radius:99px;background:#e4f8ed;color:#128553;font-weight:700;float:right}
       .sensor-v3-reading{font-size:.65rem;color:#61796e}.sensor-v3-reading b{font-size:.77rem;color:#0a4933;display:block;margin-top:2px}
       .sensor-v3-reading small{font-size:.56rem;color:#81958b}
+      .loss-hunter{background:linear-gradient(125deg,#063f2d 0%,#087449 58%,#0c9860 100%);border:1px solid #087449;border-radius:11px;padding:13px 15px;color:#fff;min-height:138px;box-shadow:0 8px 22px rgba(4,71,45,.16)}
+      .loss-hunter-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}.loss-hunter-head b{font-size:.96rem}.loss-hunter-head span{font-size:.59rem;background:rgba(255,255,255,.16);padding:4px 8px;border-radius:99px}
+      .loss-hunter-main{display:grid;grid-template-columns:1.1fr .72fr .72fr;gap:9px}.loss-hunter-main div{border-left:1px solid rgba(255,255,255,.22);padding-left:9px}.loss-hunter-main div:first-child{border-left:0;padding-left:0}
+      .loss-hunter-main small{display:block;color:#bcebd5;font-size:.58rem;text-transform:uppercase;letter-spacing:.03em}.loss-hunter-main strong{display:block;font-size:1.08rem;margin-top:2px}.loss-hunter-note{font-size:.65rem;color:#e4fff2;margin-top:10px;line-height:1.35}
+      .loss-rank{display:grid;grid-template-columns:33px 1fr 55px;align-items:center;gap:7px;padding:7px 1px;border-bottom:1px solid #e1efe8}.loss-rank:last-child{border-bottom:0}.loss-rank-index{width:25px;height:25px;border-radius:7px;background:#e8f8ef;color:#087449;font-size:.65rem;font-weight:800;display:flex;align-items:center;justify-content:center}.loss-rank b{font-size:.68rem;color:#153f31}.loss-rank small{display:block;font-size:.57rem;color:#789084}.loss-rank-value{text-align:right;font-size:.68rem;font-weight:800;color:#d06821}
+      .loss-action{background:#fff8e8;border:1px solid #f5d79f;border-radius:9px;padding:10px 12px;min-height:138px}.loss-action-title{font-size:.72rem;color:#a9610d;font-weight:800;margin-bottom:5px}.loss-action strong{font-size:.79rem;color:#184b38}.loss-action p{font-size:.64rem;color:#5d7168;line-height:1.45;margin:6px 0 0}
     </style>
     """, unsafe_allow_html=True)
     st.markdown("""<div class="sensor-v3-title"><span style="font-size:1.2rem">◉</span><div><h2>Sensör İzleme Merkezi</h2><p>Makine sağlığı, canlı sensör değerleri ve anomali uyarıları.</p></div></div>""", unsafe_allow_html=True)
@@ -4264,6 +4554,95 @@ if selected_module == "📡 Sensörler":
                         mini_chart_v3 = go.Figure(go.Scatter(x=local_history_v3["_zaman"], y=local_history_v3[mini_metric_v3], mode="lines", line=dict(color=mini_colour_v3, width=2), fill="tozeroy", fillcolor="rgba(11,155,94,.08)"))
                         mini_chart_v3.update_layout(height=96, margin=dict(l=0,r=0,t=8,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(visible=False), yaxis=dict(visible=False))
                         st.plotly_chart(mini_chart_v3, use_container_width=True, config={"displayModeBar":False}, key=f'sensor_v3_mini_{sensor_row_v3["machine_code"]}')
+
+    # Kayıp Avcısı: duruş sürelerini çevrim hızı ve canlı sensör durumu ile birleştirir.
+    loss_records_v3 = q("""
+        SELECT d.id,d.machine_code,d.reason,d.duration,d.event_at,
+               COALESCE(NULLIF(m.ideal_cycle,0),1) AS ideal_cycle
+        FROM downtime d LEFT JOIN machines m ON m.machine_code=d.machine_code
+        ORDER BY d.id DESC
+    """)
+    loss_scope_note_v3 = "Seçili tarih aralığı"
+    if not loss_records_v3.empty:
+        loss_records_v3["duration"] = pd.to_numeric(loss_records_v3["duration"], errors="coerce").fillna(0).clip(lower=0)
+        loss_records_v3["ideal_cycle"] = pd.to_numeric(loss_records_v3["ideal_cycle"], errors="coerce").replace(0, 1).fillna(1)
+        loss_records_v3["_event_time"] = pd.to_datetime(loss_records_v3["event_at"], errors="coerce")
+        if sensor_machine_filter_v3 != "Tümü":
+            loss_records_v3 = loss_records_v3[loss_records_v3["machine_code"] == sensor_machine_filter_v3]
+        dated_loss_v3 = loss_records_v3[loss_records_v3["_event_time"].notna()].copy()
+        if sensor_start_v3 and sensor_end_v3 and not dated_loss_v3.empty:
+            dated_loss_v3 = dated_loss_v3[
+                (dated_loss_v3["_event_time"].dt.date >= sensor_start_v3)
+                & (dated_loss_v3["_event_time"].dt.date <= sensor_end_v3)
+            ]
+        if not dated_loss_v3.empty:
+            loss_records_v3 = dated_loss_v3
+        else:
+            loss_records_v3 = loss_records_v3.head(50)
+            loss_scope_note_v3 = "Seçili tarihte kayıt yok · son kayıtlar"
+        loss_records_v3["estimated_units"] = (loss_records_v3["duration"] / loss_records_v3["ideal_cycle"]).round(0)
+
+    if loss_records_v3.empty:
+        loss_summary_v3 = pd.DataFrame(columns=["machine_code", "reason", "duration", "estimated_units"])
+    else:
+        loss_summary_v3 = (
+            loss_records_v3.groupby(["machine_code", "reason"], as_index=False)
+            .agg(duration=("duration", "sum"), estimated_units=("estimated_units", "sum"))
+            .sort_values(["duration", "estimated_units"], ascending=False)
+        )
+
+    st.markdown('<div class="sensor-v3-panel-title" style="margin-top:.72rem">🔎 Kayıp Avcısı <span style="float:right;font-size:.64rem;color:#639183">Duruş + çevrim + sensör analizi</span></div>', unsafe_allow_html=True)
+    loss_main_col_v3, loss_rank_col_v3, loss_action_col_v3 = st.columns([1.5, 1.05, 1.05], gap="small")
+    if loss_summary_v3.empty:
+        with loss_main_col_v3:
+            st.info("Analiz edilebilecek duruş kaydı bulunmuyor. Duruş kaydı eklendiğinde Kayıp Avcısı otomatik çalışır.")
+        with loss_rank_col_v3:
+            st.caption("Kayıp sıralaması için veri bekleniyor.")
+        with loss_action_col_v3:
+            st.caption("Sensör ve duruş kayıtlarından aksiyon önerisi üretilecek.")
+    else:
+        top_loss_v3 = loss_summary_v3.iloc[0]
+        total_loss_minutes_v3 = float(loss_summary_v3["duration"].sum())
+        total_loss_units_v3 = int(round(float(loss_summary_v3["estimated_units"].sum())))
+        top_loss_share_v3 = (float(top_loss_v3["duration"]) / total_loss_minutes_v3 * 100) if total_loss_minutes_v3 else 0
+        top_machine_v3 = str(top_loss_v3["machine_code"])
+        top_reason_v3 = str(top_loss_v3["reason"] or "Belirtilmedi")
+        safe_machine_v3 = html.escape(top_machine_v3)
+        safe_reason_v3 = html.escape(top_reason_v3)
+
+        current_loss_sensor_v3 = sensors_v3[sensors_v3["machine_code"] == top_machine_v3]
+        sensor_finding_v3 = "Canlı sensör değerleri normal aralıkta."
+        sensor_action_v3 = "Duruş nedenini, operatör notunu ve tekrar sıklığını kontrol et."
+        if not current_loss_sensor_v3.empty:
+            loss_sensor_row_v3 = current_loss_sensor_v3.iloc[0]
+            if float(loss_sensor_row_v3["temperature"]) >= 75:
+                sensor_finding_v3 = f'Sıcaklık {float(loss_sensor_row_v3["temperature"]):.1f}°C ile yüksek.'
+                sensor_action_v3 = "Soğutma hattı, fanlar ve takım yükünü kontrol et; bakım görevi aç."
+            elif float(loss_sensor_row_v3["vibration"]) >= 4:
+                sensor_finding_v3 = f'Titreşim {float(loss_sensor_row_v3["vibration"]):.1f} mm/s ile yüksek.'
+                sensor_action_v3 = "Rulman, balans ve takım tutucuyu kontrol et; titreşim trendini izle."
+            elif float(loss_sensor_row_v3["pressure"]) <= 4.5:
+                sensor_finding_v3 = f'Basınç {float(loss_sensor_row_v3["pressure"]):.1f} bar ile düşük.'
+                sensor_action_v3 = "Hava/hidrolik hattını, filtreyi ve olası kaçakları kontrol et."
+            elif "malzeme" in top_reason_v3.lower():
+                sensor_action_v3 = "Malzeme besleme ve kritik stok seviyelerini üretim planıyla eşleştir."
+            elif "operatör" in top_reason_v3.lower():
+                sensor_action_v3 = "Vardiya atamasını ve operatör yanıt süresini kontrol et."
+            elif "bakım" in top_reason_v3.lower() or "arıza" in top_reason_v3.lower():
+                sensor_action_v3 = "Tekrarlayan arıza kaydını incele ve önleyici bakım görevi oluştur."
+
+        with loss_main_col_v3:
+            st.markdown(f'''<div class="loss-hunter"><div class="loss-hunter-head"><b>🎯 En büyük kayıp bulundu</b><span>{html.escape(loss_scope_note_v3)}</span></div><div class="loss-hunter-main"><div><small>Makine · Neden</small><strong>{safe_machine_v3} · {safe_reason_v3}</strong></div><div><small>Toplam kayıp</small><strong>{float(top_loss_v3["duration"]):.0f} dk</strong></div><div><small>Tahmini üretim</small><strong>{int(round(float(top_loss_v3["estimated_units"]))):,} adet</strong></div></div><div class="loss-hunter-note">Bu neden analiz edilen kayıp süresinin <b>%{top_loss_share_v3:.1f}</b>'ini oluşturuyor. Toplam görünür kayıp: <b>{total_loss_minutes_v3:.0f} dk / yaklaşık {total_loss_units_v3:,} adet</b>.</div></div>''', unsafe_allow_html=True)
+        with loss_rank_col_v3:
+            with st.container(border=True):
+                st.markdown('<div class="sensor-v3-panel-title">En Büyük 3 Kayıp</div>', unsafe_allow_html=True)
+                for loss_rank_index_v3, (_, loss_rank_row_v3) in enumerate(loss_summary_v3.head(3).iterrows(), 1):
+                    st.markdown(f'''<div class="loss-rank"><span class="loss-rank-index">{loss_rank_index_v3}</span><div><b>{html.escape(str(loss_rank_row_v3["machine_code"]))} · {html.escape(str(loss_rank_row_v3["reason"]))}</b><small>≈ {int(round(float(loss_rank_row_v3["estimated_units"]))):,} adet</small></div><span class="loss-rank-value">{float(loss_rank_row_v3["duration"]):.0f} dk</span></div>''', unsafe_allow_html=True)
+        with loss_action_col_v3:
+            st.markdown(f'''<div class="loss-action"><div class="loss-action-title">⚡ Önerilen ilk aksiyon</div><strong>{html.escape(sensor_finding_v3)}</strong><p>{html.escape(sensor_action_v3)}</p></div>''', unsafe_allow_html=True)
+            if st.button("Duruş kayıtlarını incele →", use_container_width=True, key="loss_hunter_open_downtime"):
+                st.session_state["selected_module"] = "⏱️ Duruşlar"
+                st.rerun()
 
     sensor_bottom_left_v3, sensor_bottom_mid_v3, sensor_bottom_right_v3 = st.columns([1.05, 1.5, 1.02], gap="small")
     with sensor_bottom_left_v3:
@@ -5476,3 +5855,4 @@ st.markdown("""
     Daha akıllı üretim • Daha verimli süreçler • Daha güçlü gelecek
 </div>
 """, unsafe_allow_html=True)
+
