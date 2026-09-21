@@ -2368,6 +2368,116 @@ if not st.session_state["authenticated"]:
 
     st.stop()
 
+# Menüdeki tema seçimi oturum boyunca korunur. Karanlık tema, modül bazlı
+# stillerden sonra !important kurallarıyla uygulanarak işlevlere dokunmaz.
+if "dark_mode_enabled" not in st.session_state:
+    st.session_state["dark_mode_enabled"] = False
+
+if st.session_state["dark_mode_enabled"]:
+    st.markdown("""
+    <style>
+    :root { color-scheme: dark; }
+    .stApp,
+    [data-testid="stAppViewContainer"] {
+        background:
+            radial-gradient(circle at 92% 3%, rgba(26,140,86,.17), transparent 23%),
+            radial-gradient(circle at 5% 96%, rgba(20,103,70,.15), transparent 25%),
+            linear-gradient(135deg,#09130f 0%,#0d1b15 52%,#0a1711 100%) !important;
+        color: #dcebe3 !important;
+    }
+    [data-testid="stHeader"] { background: rgba(8,19,14,.88) !important; }
+    .main, .main .block-container, [data-testid="stMainBlockContainer"] { color:#dcebe3 !important; }
+    .main h1, .main h2, .main h3, .main h4,
+    .main p, .main label, .main li, .main .stMarkdown,
+    .main [data-testid="stCaptionContainer"] { color:#dcebe3 !important; }
+    .trex-hero-title, .trex-section-title, .trex-info-title,
+    .sensor-v3-panel-title, .sensor-v3-machine-name,
+    .mesv3-box-title, .home-v2-title { color:#ecfff4 !important; }
+    .trex-kicker, .trex-hero-sub, .trex-small, .trex-muted,
+    .sensor-v3-reading, .sensor-v3-reading small { color:#9bb9aa !important; }
+
+    /* Streamlit bileşenleri */
+    div[data-testid="stMetric"], div[data-testid="stExpander"],
+    div[data-testid="stForm"], div[data-testid="stPopoverBody"],
+    div[data-testid="stDialog"] > div,
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background:#13251d !important;
+        border-color:#294a3a !important;
+        box-shadow:0 5px 18px rgba(0,0,0,.24) !important;
+    }
+    div[data-testid="stMetricLabel"], div[data-testid="stMetricLabel"] *,
+    div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] *,
+    div[data-testid="stMetric"] p, div[data-testid="stMetric"] span {
+        color:#e7f8ee !important;
+    }
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="base-input"],
+    div[data-baseweb="textarea"] > div,
+    [data-testid="stDateInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stTextInput"] input {
+        background:#14271e !important;
+        border-color:#315542 !important;
+        color:#e8f8ef !important;
+        -webkit-text-fill-color:#e8f8ef !important;
+    }
+    div[data-baseweb="select"] span, div[data-baseweb="select"] input,
+    div[data-baseweb="select"] svg { color:#e8f8ef !important; fill:#e8f8ef !important; }
+    [data-baseweb="popover"], [role="listbox"], [role="option"] {
+        background:#14271e !important; color:#e8f8ef !important;
+    }
+    button[data-baseweb="tab"] { color:#a9c8b8 !important; }
+    button[data-baseweb="tab"][aria-selected="true"] { color:#62d594 !important; }
+    .main .stButton > button, .main button[kind="secondary"] {
+        background:#172b21 !important; border-color:#345843 !important; color:#e7f8ee !important;
+    }
+    .main .stButton > button:hover { background:#1d392b !important; border-color:#55b77e !important; color:#fff !important; }
+    hr { border-color:#294a3a !important; }
+
+    /* Tablolar ve grafik alanları */
+    div[data-testid="stDataFrame"] {
+        --gdg-bg-cell:#13251d !important;
+        --gdg-bg-cell-medium:#172b21 !important;
+        --gdg-bg-header:#1b3327 !important;
+        --gdg-bg-header-has-focus:#244837 !important;
+        --gdg-text-dark:#e4f4eb !important;
+        --gdg-text-medium:#a5c0b2 !important;
+        --gdg-border-color:#2e4b3d !important;
+        background:#13251d !important; border-color:#2e4b3d !important;
+    }
+    div[data-testid="stPlotlyChart"] { background:#12231b !important; border-color:#294a3a !important; }
+    .mes-management-wrap, .mes-management-head, .mes-management-foot,
+    .mes-management-scroll, .mes-management-table, .mes-management-table th,
+    .mes-management-table td { background:#13251d !important; color:#dcebe3 !important; border-color:#294a3a !important; }
+    .mes-management-table tr:hover td { background:#1a3126 !important; }
+
+    /* Uygulamanın özel kart ve panelleri */
+    .trex-section, .trex-hero, .trex-info-card, .trex-brand-card,
+    .dashboard-ring-card, .machine-card, .trex-priority,
+    .sensor-v3-stat, .loss-action, .notification-card, .alarm-compact,
+    .mesv3-box, .mesv3-kpi, .home-v2-card, .home-v2-machine,
+    .home-v2-panel, .mini-speed-card, .quality-card, .stock-card {
+        background:#13251d !important;
+        border-color:#2d4d3d !important;
+        color:#dcebe3 !important;
+        box-shadow:0 5px 17px rgba(0,0,0,.22) !important;
+    }
+    .notification-card.unread { background:#183426 !important; }
+    .notification-card b, .notification-card span,
+    .dashboard-ring-title, .dashboard-ring-value, .dashboard-ring-note,
+    .machine-code, .machine-stats, .machine-stats b,
+    .trex-priority-title, .trex-priority-value, .trex-priority-note,
+    .sensor-v3-stat label, .sensor-v3-stat strong, .sensor-v3-stat small,
+    .loss-action strong, .loss-action p, .loss-rank b, .loss-rank small {
+        color:#dcebe3 !important;
+    }
+    .dashboard-ring:after { background:#13251d !important; }
+    .loss-rank { border-color:#294a3a !important; }
+    .trex-footer { background:#13251d !important; border-color:#294a3a !important; color:#a9c8b8 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
 # QR bağlantısından gelindiğinde doğrudan ilgili makinenin detay ekranını aç.
 qr_machine_from_url = st.query_params.get("machine")
 if qr_machine_from_url:
@@ -2513,6 +2623,11 @@ with st.sidebar:
         f'<div style="font-weight:800;">👤 {st.session_state.get("full_name", "")}</div>'
         f'<div style="font-size:.78rem;margin-top:2px;">Rol: <b>{role_label}</b></div></div>',
         unsafe_allow_html=True
+    )
+    st.toggle(
+        "🌙 Karanlık Mod",
+        key="dark_mode_enabled",
+        help="Tüm MES ekranlarında göz yormayan koyu renk temasını açar."
     )
     if is_admin():
         unsafe_accounts = default_password_accounts()
