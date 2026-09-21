@@ -262,9 +262,19 @@ def perform_pending_undo():
     return True
 
 
+DEFAULT_SENSOR_THRESHOLDS = {
+    "temperature_warning": 75.0,
+    "temperature_critical": 85.0,
+    "vibration_warning": 4.0,
+    "vibration_critical": 5.0,
+    "pressure_warning": 4.5,
+    "pressure_critical": 3.5,
+}
+
+
 @st.cache_resource(show_spinner=False)
-def ensure_notification_schema(database_identity, schema_version="notifications-v1"):
-    """Bildirim tablosunu SQLite ve PostgreSQL üzerinde güvenle oluşturur."""
+def ensure_notification_schema(database_identity, schema_version="notifications-v2-thresholds"):
+    """Bildirim ve işletme ayarı tablolarını SQLite/PostgreSQL üzerinde oluşturur."""
     connection = conn()
     connection.execute("""
         CREATE TABLE IF NOT EXISTS notifications(
@@ -288,9 +298,47 @@ def ensure_notification_schema(database_identity, schema_version="notifications-
     """)
     connection.execute("CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_username,recipient_role,is_read)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_notifications_entity ON notifications(entity_type,entity_id)")
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings(
+            setting_key TEXT PRIMARY KEY,
+            setting_value REAL NOT NULL,
+            updated_at TEXT,
+            updated_by TEXT
+        )
+    """)
+    for setting_key, setting_value in DEFAULT_SENSOR_THRESHOLDS.items():
+        connection.execute("""
+            INSERT INTO system_settings(setting_key,setting_value,updated_at,updated_by)
+            VALUES(?,?,?,?) ON CONFLICT(setting_key) DO NOTHING
+        """, (setting_key, setting_value, now(), "sistem"))
     connection.commit()
     connection.close()
     return True
+
+
+def get_sensor_thresholds():
+    values = DEFAULT_SENSOR_THRESHOLDS.copy()
+    try:
+        rows = q("SELECT setting_key,setting_value FROM system_settings")
+        for _, row in rows.iterrows():
+            if row["setting_key"] in values:
+                values[row["setting_key"]] = float(row["setting_value"])
+    except Exception:
+        # İlk kurulum sırasında varsayılanlarla güvenli biçimde devam edilir.
+        pass
+    return values
+
+
+def save_sensor_thresholds(values):
+    for setting_key in DEFAULT_SENSOR_THRESHOLDS:
+        execute("""
+            INSERT INTO system_settings(setting_key,setting_value,updated_at,updated_by)
+            VALUES(?,?,?,?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value=excluded.setting_value,
+                updated_at=excluded.updated_at,
+                updated_by=excluded.updated_by
+        """, (setting_key, float(values[setting_key]), now(), st.session_state.get("username", "sistem")))
 
 
 def create_notification(*, recipient_username="", recipient_role="", notification_type="Görev",
@@ -1312,6 +1360,7 @@ def local_simulate():
     c = conn()
     timestamp = now()
     today = date.today()
+    thresholds = get_sensor_thresholds()
     summary = {"production": 0, "alarms": 0, "status_changes": 0, "queued_dispatches": 0}
 
     for r in c.execute("SELECT * FROM machines ORDER BY machine_code").fetchall():
@@ -1389,19 +1438,21 @@ def local_simulate():
             vibration = round(max(0, min(vibration, 12)), 2)
             pressure = round(max(0, min(pressure, 8)), 2)
 
-            if temperature >= 95 or vibration >= 10 or pressure < 4:
+            if (temperature >= thresholds["temperature_critical"] + 10
+                    or vibration >= thresholds["vibration_critical"] + 3
+                    or pressure < thresholds["pressure_critical"]):
                 new_status = "Arızalı"
-            if temperature >= 85:
+            if temperature >= thresholds["temperature_critical"]:
                 alarm_list.append(("Motor sıcaklığı kritik seviyede", "Kritik"))
-            elif temperature >= 75:
+            elif temperature >= thresholds["temperature_warning"]:
                 alarm_list.append(("Motor sıcaklığı yükseldi", "Uyarı"))
-            if vibration >= 7:
+            if vibration >= thresholds["vibration_critical"]:
                 alarm_list.append(("Titreşim seviyesi kritik", "Kritik"))
-            elif vibration >= 4:
+            elif vibration >= thresholds["vibration_warning"]:
                 alarm_list.append(("Titreşim seviyesi yükseldi", "Uyarı"))
-            if pressure < 4:
+            if pressure <= thresholds["pressure_critical"]:
                 alarm_list.append(("Basınç seviyesi düşük", "Kritik"))
-            elif pressure < 5:
+            elif pressure <= thresholds["pressure_warning"]:
                 alarm_list.append(("Basınç seviyesi düşüyor", "Uyarı"))
             if maintenance_due:
                 alarm_list.append(("Planlı bakım tarihi geldi", "Uyarı"))
@@ -2405,10 +2456,10 @@ if not st.session_state["authenticated"]:
 # stillerden sonra !important kurallarıyla uygulanarak işlevlere dokunmaz.
 if "dark_mode_enabled" not in st.session_state:
     st.session_state["dark_mode_enabled"] = False
-if "compact_view_enabled" not in st.session_state:
-    st.session_state["compact_view_enabled"] = False
 if "critical_focus_enabled" not in st.session_state:
     st.session_state["critical_focus_enabled"] = False
+if "bulk_action_enabled" not in st.session_state:
+    st.session_state["bulk_action_enabled"] = False
 
 if st.session_state["dark_mode_enabled"]:
     st.markdown("""
@@ -2515,30 +2566,6 @@ if st.session_state["dark_mode_enabled"]:
     .dashboard-ring:after { background:#13251d !important; }
     .loss-rank { border-color:#294a3a !important; }
     .trex-footer { background:#13251d !important; border-color:#294a3a !important; color:#a9c8b8 !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-if st.session_state["compact_view_enabled"]:
-    st.markdown("""
-    <style>
-    .main .block-container { max-width:1720px !important; padding-top:.38rem !important; padding-bottom:1.5rem !important; }
-    [data-testid="stVerticalBlock"] { gap:.48rem !important; }
-    [data-testid="stHorizontalBlock"] { gap:.55rem !important; }
-    div[data-testid="stMetric"] { padding:9px 12px !important; min-height:68px !important; border-radius:10px !important; }
-    div[data-testid="stMetricValue"] { font-size:1.38rem !important; }
-    div[data-testid="stMetricLabel"] { font-size:.72rem !important; }
-    div[data-testid="stVerticalBlockBorderWrapper"] { border-radius:9px !important; }
-    .trex-topbar { padding-bottom:4px !important; }
-    .trex-section, .trex-hero, .trex-info-card, .trex-brand-card,
-    .dashboard-ring-card, .machine-card, .trex-priority,
-    .sensor-v3-stat, .loss-action, .notification-card,
-    .mesv3-box, .mesv3-kpi, .home-v2-card, .home-v2-machine,
-    .home-v2-panel { padding:7px 9px !important; border-radius:8px !important; min-height:0 !important; }
-    .stButton > button { min-height:32px !important; padding:.28rem .65rem !important; }
-    div[data-testid="stDataFrame"] { border-radius:8px !important; font-size:.76rem !important; }
-    div[data-testid="stPlotlyChart"] { padding:3px !important; border-radius:8px !important; }
-    .nav-group-title { margin:9px 0 3px !important; }
-    section[data-testid="stSidebar"] div[data-testid="stButton"] button { min-height:32px !important; padding:5px 9px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -2749,7 +2776,7 @@ with header_notification:
 
 if st.session_state.get("critical_focus_enabled", False):
     st.markdown(
-        f'<div class="critical-focus-strip"><strong>🚨 Kritik Odak Açık</strong>'
+        f'<div class="critical-focus-strip"><strong>Kritik Odak Açık</strong>'
         f'<span>{critical_focus_counts["alarms"]} kritik alarm</span>'
         f'<span>{critical_focus_counts["machines"]} arızalı makine</span>'
         f'<span>{critical_focus_counts["orders"]} geciken iş</span>'
@@ -2766,6 +2793,54 @@ if st.session_state.get("critical_focus_enabled", False):
     if focus_maintenance_col.button("Geciken bakımlar", key="focus_open_maintenance", use_container_width=True):
         st.session_state["selected_module"] = "🔧 Bakım"; st.rerun()
 
+if st.session_state.get("bulk_action_enabled", False):
+    with st.expander("Toplu İşlem Merkezi", expanded=True):
+        bulk_options = []
+        if has_role("admin", "maintenance"):
+            bulk_options.append("Alarmları onayla")
+        if has_role("admin", "operator"):
+            bulk_options.append("İş emirlerinin durumunu değiştir")
+        if not bulk_options:
+            st.info("Rolünüz için kullanılabilir toplu işlem bulunmuyor.")
+        else:
+            bulk_action_type = st.selectbox("İşlem türü", bulk_options, key="bulk_action_type")
+            if bulk_action_type == "Alarmları onayla":
+                bulk_alarm_rows = q("SELECT id,machine_code,alarm,level,time FROM alarms WHERE acknowledged=0 ORDER BY id DESC LIMIT 100")
+                if bulk_alarm_rows.empty:
+                    st.success("Onay bekleyen alarm bulunmuyor.")
+                else:
+                    bulk_alarm_labels = {int(row["id"]): f'{row["machine_code"]} · {row["level"]} · {row["alarm"]}' for _, row in bulk_alarm_rows.iterrows()}
+                    selected_bulk_alarms = st.multiselect("Alarmlar", list(bulk_alarm_labels), format_func=lambda item: bulk_alarm_labels[item], key="bulk_alarm_ids")
+                    if st.button("Seçilen Alarmları Onayla", type="primary", disabled=not selected_bulk_alarms, key="bulk_ack_alarms", use_container_width=True):
+                        for alarm_id in selected_bulk_alarms:
+                            execute("UPDATE alarms SET acknowledged=1 WHERE id=?", (int(alarm_id),))
+                        register_undo(
+                            f"{len(selected_bulk_alarms)} alarm toplu onaylandı",
+                            [("UPDATE alarms SET acknowledged=0 WHERE id=?", (int(alarm_id),)) for alarm_id in selected_bulk_alarms]
+                        )
+                        audit_event("Alarmları toplu onayladı", "Alarm", f"Kayıtlar: {selected_bulk_alarms}")
+                        st.success(f"{len(selected_bulk_alarms)} alarm onaylandı.")
+                        st.rerun()
+            else:
+                bulk_order_rows = q("SELECT id,order_no,machine_code,product,status FROM work_orders WHERE status NOT IN ('Tamamlandı','İptal') ORDER BY id DESC LIMIT 100")
+                if bulk_order_rows.empty:
+                    st.success("Güncellenecek aktif iş emri bulunmuyor.")
+                else:
+                    bulk_order_labels = {int(row["id"]): f'{row["order_no"]} · {row["machine_code"]} · {row["product"]} · {row["status"]}' for _, row in bulk_order_rows.iterrows()}
+                    selected_bulk_orders = st.multiselect("İş emirleri", list(bulk_order_labels), format_func=lambda item: bulk_order_labels[item], key="bulk_order_ids")
+                    bulk_order_status = st.selectbox("Yeni durum", ["Sırada", "Bekliyor", "Üretimde"], key="bulk_order_status")
+                    if st.button("Seçilen İş Emirlerini Güncelle", type="primary", disabled=not selected_bulk_orders, key="bulk_update_orders", use_container_width=True):
+                        previous_order_statuses = bulk_order_rows[bulk_order_rows["id"].isin(selected_bulk_orders)][["id", "status"]].copy()
+                        for order_id in selected_bulk_orders:
+                            execute("UPDATE work_orders SET status=? WHERE id=?", (bulk_order_status, int(order_id)))
+                        register_undo(
+                            f"{len(selected_bulk_orders)} iş emri toplu güncellendi",
+                            [("UPDATE work_orders SET status=? WHERE id=?", (row["status"], int(row["id"]))) for _, row in previous_order_statuses.iterrows()]
+                        )
+                        audit_event("İş emirlerini toplu güncelledi", "İş Emri", f"{selected_bulk_orders} · {bulk_order_status}")
+                        st.success(f"{len(selected_bulk_orders)} iş emri '{bulk_order_status}' durumuna alındı.")
+                        st.rerun()
+
 with st.sidebar:
     role_label = ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")
     st.markdown(
@@ -2777,19 +2852,19 @@ with st.sidebar:
         unsafe_allow_html=True
     )
     st.toggle(
-        "🌙 Karanlık Mod",
+        "Karanlık Mod",
         key="dark_mode_enabled",
         help="Tüm MES ekranlarında göz yormayan koyu renk temasını açar."
     )
     st.toggle(
-        "↔️ Kompakt Görünüm",
-        key="compact_view_enabled",
-        help="Kart ve tablo aralıklarını küçülterek aynı ekranda daha fazla veri gösterir."
-    )
-    st.toggle(
-        "🚨 Kritik Odak Modu",
+        "Kritik Odak Modu",
         key="critical_focus_enabled",
         help="Kritik alarm, arızalı makine ve geciken işleri her sayfanın üstünde öne çıkarır."
+    )
+    st.toggle(
+        "Toplu İşlem Modu",
+        key="bulk_action_enabled",
+        help="Alarm ve iş emirlerinde birden fazla kaydı aynı anda günceller."
     )
     undo_action = pending_undo_action()
     if undo_action:
@@ -2858,6 +2933,47 @@ with st.sidebar:
             key="global_date_range",
             help="Zaman serisi, alarm ve üretim görünümlerinde kullanılacak tarih aralığı."
         )
+    current_thresholds = get_sensor_thresholds()
+    with st.expander("Akıllı Eşik Ayarları", expanded=False):
+        st.caption("Bu değerler sensör durumunu, alarm üretimini ve Kayıp Avcısı önerilerini doğrudan etkiler.")
+        if is_admin():
+            with st.form("smart_threshold_form"):
+                threshold_profile = st.selectbox("Profil", ["Özel", "Hassas", "Standart", "Esnek",], index=0)
+                temp_warning = st.number_input("Sıcaklık uyarı (°C)", min_value=20.0, max_value=120.0, value=float(current_thresholds["temperature_warning"]), step=1.0)
+                temp_critical = st.number_input("Sıcaklık kritik (°C)", min_value=20.0, max_value=130.0, value=float(current_thresholds["temperature_critical"]), step=1.0)
+                vibration_warning = st.number_input("Titreşim uyarı (mm/s)", min_value=.1, max_value=20.0, value=float(current_thresholds["vibration_warning"]), step=.1)
+                vibration_critical = st.number_input("Titreşim kritik (mm/s)", min_value=.1, max_value=25.0, value=float(current_thresholds["vibration_critical"]), step=.1)
+                pressure_warning = st.number_input("Basınç uyarı alt sınırı (bar)", min_value=.1, max_value=15.0, value=float(current_thresholds["pressure_warning"]), step=.1)
+                pressure_critical = st.number_input("Basınç kritik alt sınırı (bar)", min_value=.1, max_value=15.0, value=float(current_thresholds["pressure_critical"]), step=.1)
+                save_thresholds = st.form_submit_button("Eşikleri Kaydet", type="primary", use_container_width=True)
+            if save_thresholds:
+                if threshold_profile != "Özel":
+                    profiles = {
+                        "Hassas": (70.0, 80.0, 3.5, 4.5, 5.0, 4.0),
+                        "Standart": (75.0, 85.0, 4.0, 5.0, 4.5, 3.5),
+                        "Esnek": (80.0, 95.0, 5.0, 7.0, 4.0, 3.0),
+                    }
+                    temp_warning, temp_critical, vibration_warning, vibration_critical, pressure_warning, pressure_critical = profiles[threshold_profile]
+                if temp_warning >= temp_critical or vibration_warning >= vibration_critical or pressure_critical >= pressure_warning:
+                    st.error("Uyarı ve kritik sınırlarının sıralamasını kontrol edin.")
+                else:
+                    new_thresholds = {
+                        "temperature_warning": temp_warning, "temperature_critical": temp_critical,
+                        "vibration_warning": vibration_warning, "vibration_critical": vibration_critical,
+                        "pressure_warning": pressure_warning, "pressure_critical": pressure_critical,
+                    }
+                    save_sensor_thresholds(new_thresholds)
+                    register_undo(
+                        "Sensör eşikleri güncellendi",
+                        [("UPDATE system_settings SET setting_value=?,updated_at=?,updated_by=? WHERE setting_key=?", (old_value, now(), st.session_state.get("username", "sistem"), setting_key)) for setting_key, old_value in current_thresholds.items()]
+                    )
+                    audit_event("Akıllı eşikleri güncelledi", threshold_profile, str(new_thresholds))
+                    st.success(f"{threshold_profile} eşik profili uygulandı.")
+                    st.rerun()
+        else:
+            st.caption(f'Sıcaklık: {current_thresholds["temperature_warning"]:.0f}/{current_thresholds["temperature_critical"]:.0f}°C')
+            st.caption(f'Titreşim: {current_thresholds["vibration_warning"]:.1f}/{current_thresholds["vibration_critical"]:.1f} mm/s')
+            st.caption(f'Basınç alt sınırı: {current_thresholds["pressure_warning"]:.1f}/{current_thresholds["pressure_critical"]:.1f} bar')
     st.divider()
     st.markdown(
         '<div style="color:#d9f5df;font-size:.72rem;font-weight:800;'
@@ -4775,12 +4891,13 @@ if selected_module == "📡 Sensörler":
     """)
     history_v3 = q("SELECT machine_code,temperature,vibration,pressure,rpm,timestamp FROM sensor_history ORDER BY timestamp DESC LIMIT 1000")
     energy_v3 = q("SELECT COALESCE(SUM(energy_kwh),0) AS total_energy FROM energy_readings")
+    sensor_thresholds_v3 = get_sensor_thresholds()
     for metric_v3 in ["temperature", "vibration", "pressure", "rpm"]:
         if metric_v3 not in sensors_v3.columns: sensors_v3[metric_v3] = 0
         sensors_v3[metric_v3] = pd.to_numeric(sensors_v3[metric_v3], errors="coerce").fillna(0)
     sensors_v3["_sensor_status"] = "Normal"
-    sensors_v3.loc[(sensors_v3["temperature"] >= 85) | (sensors_v3["vibration"] >= 5.0) | (sensors_v3["pressure"] <= 3.5), "_sensor_status"] = "Kritik"
-    sensors_v3.loc[(sensors_v3["_sensor_status"] == "Normal") & ((sensors_v3["temperature"] >= 75) | (sensors_v3["vibration"] >= 4.0) | (sensors_v3["pressure"] <= 4.5)), "_sensor_status"] = "Uyarı"
+    sensors_v3.loc[(sensors_v3["temperature"] >= sensor_thresholds_v3["temperature_critical"]) | (sensors_v3["vibration"] >= sensor_thresholds_v3["vibration_critical"]) | (sensors_v3["pressure"] <= sensor_thresholds_v3["pressure_critical"]), "_sensor_status"] = "Kritik"
+    sensors_v3.loc[(sensors_v3["_sensor_status"] == "Normal") & ((sensors_v3["temperature"] >= sensor_thresholds_v3["temperature_warning"]) | (sensors_v3["vibration"] >= sensor_thresholds_v3["vibration_warning"]) | (sensors_v3["pressure"] <= sensor_thresholds_v3["pressure_warning"])), "_sensor_status"] = "Uyarı"
     history_v3["_zaman"] = pd.to_datetime(history_v3["timestamp"], errors="coerce") if not history_v3.empty else pd.Series(dtype="datetime64[ns]")
     history_v3["_tarih"] = history_v3["_zaman"].dt.date if not history_v3.empty else pd.Series(dtype="object")
 
@@ -4812,7 +4929,7 @@ if selected_module == "📡 Sensörler":
     avg_pressure_v3 = float(visible_sensors_v3["pressure"].mean()) if not visible_sensors_v3.empty else 0.0
     avg_rpm_v3 = float(visible_sensors_v3["rpm"].mean()) if not visible_sensors_v3.empty else 0.0
     total_energy_v3 = float(energy_v3.iloc[0]["total_energy"]) if not energy_v3.empty else 0.0
-    sensor_stats_v3 = [("♨", "Ortalama Sıcaklık", f"{avg_temperature_v3:.1f} °C", "Limit: 85°C"), ("⌁", "Ortalama Titreşim", f"{avg_vibration_v3:.1f} mm/s", "Limit: 5.0 mm/s"), ("◉", "Ortalama Basınç", f"{avg_pressure_v3:.1f} bar", "Limit: 4.5 bar"), ("↻", "Ortalama RPM", f"{avg_rpm_v3:.0f}", "Nominal devir"), ("ϟ", "Toplam Enerji Tüketimi", f"{total_energy_v3:.1f} kWh", "Kayıtlı toplam")]
+    sensor_stats_v3 = [("♨", "Ortalama Sıcaklık", f"{avg_temperature_v3:.1f} °C", f'Kritik: {sensor_thresholds_v3["temperature_critical"]:.0f}°C'), ("⌁", "Ortalama Titreşim", f"{avg_vibration_v3:.1f} mm/s", f'Kritik: {sensor_thresholds_v3["vibration_critical"]:.1f} mm/s'), ("◉", "Ortalama Basınç", f"{avg_pressure_v3:.1f} bar", f'Alt limit: {sensor_thresholds_v3["pressure_warning"]:.1f} bar'), ("↻", "Ortalama RPM", f"{avg_rpm_v3:.0f}", "Nominal devir"), ("ϟ", "Toplam Enerji Tüketimi", f"{total_energy_v3:.1f} kWh", "Kayıtlı toplam")]
     sensor_stat_cols_v3 = st.columns(5)
     for sensor_stat_col_v3, (sensor_icon_v3, sensor_label_v3, sensor_value_v3, sensor_hint_v3) in zip(sensor_stat_cols_v3, sensor_stats_v3):
         with sensor_stat_col_v3:
@@ -4840,7 +4957,7 @@ if selected_module == "📡 Sensörler":
                     status_text_v3 = {"Normal":"#128553", "Uyarı":"#b66e00", "Kritik":"#c73840"}.get(sensor_row_v3["_sensor_status"], "#128553")
                     st.markdown(f'<div class="sensor-v3-machine-name">▣ {sensor_row_v3["machine_code"]}<span class="sensor-v3-status" style="background:{status_color_v3};color:{status_text_v3}">{sensor_row_v3["_sensor_status"]}</span></div>', unsafe_allow_html=True)
                     sensor_kpi_a_v3, sensor_kpi_b_v3, sensor_kpi_c_v3, sensor_kpi_d_v3 = st.columns(4)
-                    for sensor_kpi_col_v3, sensor_metric_name_v3, sensor_metric_value_v3, sensor_metric_limit_v3 in zip([sensor_kpi_a_v3, sensor_kpi_b_v3, sensor_kpi_c_v3, sensor_kpi_d_v3], ["Sıcaklık", "Titreşim", "Basınç", "RPM"], [f'{sensor_row_v3["temperature"]:.1f}°C', f'{sensor_row_v3["vibration"]:.1f}', f'{sensor_row_v3["pressure"]:.1f}', f'{sensor_row_v3["rpm"]:.0f}'], ["85°C", "5.0", "4.5", "1800"]):
+                    for sensor_kpi_col_v3, sensor_metric_name_v3, sensor_metric_value_v3, sensor_metric_limit_v3 in zip([sensor_kpi_a_v3, sensor_kpi_b_v3, sensor_kpi_c_v3, sensor_kpi_d_v3], ["Sıcaklık", "Titreşim", "Basınç", "RPM"], [f'{sensor_row_v3["temperature"]:.1f}°C', f'{sensor_row_v3["vibration"]:.1f}', f'{sensor_row_v3["pressure"]:.1f}', f'{sensor_row_v3["rpm"]:.0f}'], [f'{sensor_thresholds_v3["temperature_critical"]:.0f}°C', f'{sensor_thresholds_v3["vibration_critical"]:.1f}', f'{sensor_thresholds_v3["pressure_warning"]:.1f}', "1800"]):
                         with sensor_kpi_col_v3:
                             st.markdown(f'<div class="sensor-v3-reading">{sensor_metric_name_v3}<b>{sensor_metric_value_v3}</b><small>Limit: {sensor_metric_limit_v3}</small></div>', unsafe_allow_html=True)
                     local_history_v3 = visible_history_v3[visible_history_v3["machine_code"] == sensor_row_v3["machine_code"]].sort_values("_zaman").tail(24) if not visible_history_v3.empty else pd.DataFrame()
@@ -4911,13 +5028,13 @@ if selected_module == "📡 Sensörler":
         sensor_action_v3 = "Duruş nedenini, operatör notunu ve tekrar sıklığını kontrol et."
         if not current_loss_sensor_v3.empty:
             loss_sensor_row_v3 = current_loss_sensor_v3.iloc[0]
-            if float(loss_sensor_row_v3["temperature"]) >= 75:
+            if float(loss_sensor_row_v3["temperature"]) >= sensor_thresholds_v3["temperature_warning"]:
                 sensor_finding_v3 = f'Sıcaklık {float(loss_sensor_row_v3["temperature"]):.1f}°C ile yüksek.'
                 sensor_action_v3 = "Soğutma hattı, fanlar ve takım yükünü kontrol et; bakım görevi aç."
-            elif float(loss_sensor_row_v3["vibration"]) >= 4:
+            elif float(loss_sensor_row_v3["vibration"]) >= sensor_thresholds_v3["vibration_warning"]:
                 sensor_finding_v3 = f'Titreşim {float(loss_sensor_row_v3["vibration"]):.1f} mm/s ile yüksek.'
                 sensor_action_v3 = "Rulman, balans ve takım tutucuyu kontrol et; titreşim trendini izle."
-            elif float(loss_sensor_row_v3["pressure"]) <= 4.5:
+            elif float(loss_sensor_row_v3["pressure"]) <= sensor_thresholds_v3["pressure_warning"]:
                 sensor_finding_v3 = f'Basınç {float(loss_sensor_row_v3["pressure"]):.1f} bar ile düşük.'
                 sensor_action_v3 = "Hava/hidrolik hattını, filtreyi ve olası kaçakları kontrol et."
             elif "malzeme" in top_reason_v3.lower():
@@ -4970,7 +5087,7 @@ if selected_module == "📡 Sensörler":
             else:
                 for _, anomaly_v3 in anomalies_v3.iterrows():
                     anomaly_colour_v3 = "#e6585d" if anomaly_v3["_sensor_status"] == "Kritik" else "#e9a23a"
-                    issue_v3 = "Sıcaklık yüksek" if anomaly_v3["temperature"] >= 75 else ("Titreşim yüksek" if anomaly_v3["vibration"] >= 4 else "Basınç düşük")
+                    issue_v3 = "Sıcaklık yüksek" if anomaly_v3["temperature"] >= sensor_thresholds_v3["temperature_warning"] else ("Titreşim yüksek" if anomaly_v3["vibration"] >= sensor_thresholds_v3["vibration_warning"] else "Basınç düşük")
                     st.markdown(f'<div style="border-left:3px solid {anomaly_colour_v3};padding:5px 7px;margin:2px 0;background:#fff;border-radius:4px"><b style="font-size:.7rem;color:#174b39">{anomaly_v3["machine_code"]} · {issue_v3}</b><br><span style="font-size:.62rem;color:#71877b">{anomaly_v3["_sensor_status"]} · {anomaly_v3["timestamp"]}</span></div>', unsafe_allow_html=True)
         with st.container(border=True):
             st.markdown('<div class="sensor-v3-panel-title">⚡ Hızlı İşlemler</div>', unsafe_allow_html=True)
