@@ -1025,8 +1025,8 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
-    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
+    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
     "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
 }
 
@@ -1038,7 +1038,7 @@ NAV_LABELS = {
     "📦 Stok": "Stok", "🔎 Detay": "Makine Detayı", "📄 Raporlar": "Raporlar",
     "📺 Andon Ekranı": "Andon Panosu", "🔳 QR Makine": "QR Makine", "📜 Denetim Kaydı": "Denetim ve Yedekleme",
     "👥 Kullanıcı Yönetimi": "Kullanıcı ve Yetki", "📊 Veritabanı": "Veri ve Raporlama",
-    "🧠 Akıllı Analiz": "Akıllı Analiz",
+    "🧠 Akıllı Analiz": "Akıllı Analiz", "👥 OLE": "İşgücü OLE",
 }
 
 
@@ -2602,6 +2602,7 @@ module_page_info = {
     "📜 Denetim Kaydı": ("Denetim Kaydı", "Kullanıcı işlemleri ve yedekleme kayıtları"),
     "👥 Kullanıcı Yönetimi": ("Kullanıcı Yönetimi", "Admin için rol ve kullanıcı durumu düzenleme"),
     "🧠 Akıllı Analiz": ("Akıllı Analiz", "Üretim, OEE ve bakım riskleri için karar desteği"),
+    "👥 OLE": ("İşgücü OLE", "Operatör ve vardiya bazında tahmini işgücü etkinliği"),
 }
 active_module = st.session_state.get("selected_module", "🏠 Ana Sayfa")
 if not can_access_module(active_module):
@@ -2982,7 +2983,7 @@ with st.sidebar:
     )
 
     module_groups = {
-        "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE"],
+        "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE"],
         "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
         "KALİTE VE BAKIM": ["✅ Kalite", "🔧 Bakım", "📦 Stok"],
         "YÖNETİM": ["🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
@@ -3120,6 +3121,72 @@ def date_range_bounds(selected_range):
     return selected_range, selected_range
 
 
+def labor_effectiveness_metrics(machine_frame):
+    """Mevcut vardiya ve kayıtlı operatör kayıplarından tahmini OLE üretir.
+
+    İşgücü Kullanılabilirliği yalnızca operatör/personel/mola kaynaklı kayıpları,
+    Performans ideal çevrimde üretilmesi gereken süreyi ve Kalite sağlam ürünü kullanır.
+    """
+    columns = [
+        "Operatör", "Vardiya", "Makine Sayısı", "Planlı Süre", "İşgücü Kaybı",
+        "Üretim", "Sağlam Üretim", "Kullanılabilirlik", "Performans", "Kalite", "OLE", "Durum"
+    ]
+    if machine_frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    downtime_rows = q("SELECT machine_code,reason,duration,event_at FROM downtime ORDER BY id DESC")
+    if not downtime_rows.empty:
+        dated_losses = downtime_rows[downtime_rows["event_at"].notna()].copy()
+        undated_losses = downtime_rows[downtime_rows["event_at"].isna()].copy()
+        dated_losses = filter_by_date_range(dated_losses, "event_at")
+        downtime_rows = pd.concat([dated_losses, undated_losses], ignore_index=True)
+        labor_reason = downtime_rows["reason"].fillna("").astype(str).str.lower()
+        labor_losses = downtime_rows[labor_reason.str.contains("operatör|operator|personel|mola|işgücü|iscilik|işçilik", regex=True)].copy()
+        labor_losses["duration"] = pd.to_numeric(labor_losses["duration"], errors="coerce").fillna(0).clip(lower=0)
+        loss_by_machine = labor_losses.groupby("machine_code")["duration"].sum().to_dict()
+    else:
+        loss_by_machine = {}
+
+    raw_rows = []
+    for _, machine in machine_frame.iterrows():
+        planned = max(float(machine.get("planned_time", 0) or 0), 0)
+        labor_loss = min(float(loss_by_machine.get(machine["machine_code"], 0)), planned)
+        production = max(int(machine.get("production", 0) or 0), 0)
+        defective = min(max(int(machine.get("defective", 0) or 0), 0), production)
+        raw_rows.append({
+            "Operatör": str(machine.get("operator") or "Atanmamış"),
+            "Vardiya": str(machine.get("shift") or active_shift_name()),
+            "Makine": str(machine["machine_code"]),
+            "Planlı Süre": planned,
+            "İşgücü Kaybı": labor_loss,
+            "İdeal Üretim Süresi": max(float(machine.get("ideal_cycle", 0) or 0), 0) * production,
+            "Üretim": production,
+            "Hatalı": defective,
+        })
+    raw = pd.DataFrame(raw_rows)
+    grouped = raw.groupby(["Operatör", "Vardiya"], as_index=False).agg(
+        **{
+            "Makine Sayısı": ("Makine", "nunique"),
+            "Planlı Süre": ("Planlı Süre", "sum"),
+            "İşgücü Kaybı": ("İşgücü Kaybı", "sum"),
+            "İdeal Üretim Süresi": ("İdeal Üretim Süresi", "sum"),
+            "Üretim": ("Üretim", "sum"),
+            "Hatalı": ("Hatalı", "sum"),
+        }
+    )
+    productive_minutes = (grouped["Planlı Süre"] - grouped["İşgücü Kaybı"]).clip(lower=0)
+    planned_denominator = grouped["Planlı Süre"].where(grouped["Planlı Süre"].ne(0))
+    productive_denominator = productive_minutes.where(productive_minutes.ne(0))
+    production_denominator = grouped["Üretim"].where(grouped["Üretim"].ne(0))
+    grouped["Sağlam Üretim"] = (grouped["Üretim"] - grouped["Hatalı"]).clip(lower=0)
+    grouped["Kullanılabilirlik"] = (productive_minutes / planned_denominator).fillna(0).clip(0, 1) * 100
+    grouped["Performans"] = (grouped["İdeal Üretim Süresi"] / productive_denominator).fillna(0).clip(0, 1) * 100
+    grouped["Kalite"] = (grouped["Sağlam Üretim"] / production_denominator).fillna(0).clip(0, 1) * 100
+    grouped["OLE"] = grouped["Kullanılabilirlik"] * grouped["Performans"] * grouped["Kalite"] / 10000
+    grouped["Durum"] = grouped["OLE"].map(lambda value: "İyi" if value >= 85 else ("Takip" if value >= 70 else ("Riskli" if value >= 60 else "Kritik")))
+    return grouped[columns].sort_values("OLE", ascending=False).reset_index(drop=True)
+
+
 def shift_production_totals():
     """Vardiya etiketli üretim anlık kayıtlarından gerçek parça artışını hesaplar."""
     history = q("""
@@ -3181,6 +3248,21 @@ average_quality = df["quality"].mean() * 100
 
 total_production = int(df["production"].sum())
 total_target = int(df["target"].sum())
+
+labor_metrics = labor_effectiveness_metrics(df)
+if labor_metrics.empty:
+    overall_labor_availability = overall_labor_performance = overall_labor_quality = overall_ole = 0.0
+    total_labor_loss = 0.0
+else:
+    labor_weights = labor_metrics["Planlı Süre"].clip(lower=0)
+    labor_weight_total = max(float(labor_weights.sum()), 1.0)
+    overall_labor_availability = float((labor_metrics["Kullanılabilirlik"] * labor_weights).sum() / labor_weight_total)
+    overall_labor_performance = float((labor_metrics["Performans"] * labor_weights).sum() / labor_weight_total)
+    total_good_labor_output = float(labor_metrics["Sağlam Üretim"].sum())
+    total_labor_output = float(labor_metrics["Üretim"].sum())
+    overall_labor_quality = total_good_labor_output / max(total_labor_output, 1) * 100
+    overall_ole = overall_labor_availability * overall_labor_performance * overall_labor_quality / 10000
+    total_labor_loss = float(labor_metrics["İşgücü Kaybı"].sum())
 
 
 production_gap = total_production - total_target
@@ -3253,9 +3335,10 @@ if selected_module == "🏠 Ana Sayfa":
             ("◆", "Kalite", f"%{average_quality:.1f}", "Uygun üretim"),
             ("◌", "Kullanılabilirlik", f"%{float(df['availability'].mean() * 100):.1f}", "Çalışma oranı"),
             ("◈", "Performans", f"%{float(df['performance'].mean() * 100):.1f}", "Çevrim performansı"),
+            ("👥", "İşgücü OLE", f"%{overall_ole:.1f}", "Tahmini"),
         ]
         for kpi_row_v3 in (kpi_values_v3[:3], kpi_values_v3[3:]):
-            top_kpis_v3 = st.columns(3, gap="small")
+            top_kpis_v3 = st.columns(len(kpi_row_v3), gap="small")
             for column, (icon, label, value, note) in zip(top_kpis_v3, kpi_row_v3):
                 with column:
                     st.markdown(f"<div class='mesv3-kpi'><span class='mesv3-kpi-icon'>{icon}</span><div><div class='mesv3-kpi-title'>{label}</div><span class='mesv3-kpi-value'>{value}</span><span class='mesv3-kpi-note'>▲ {note}</span></div></div>", unsafe_allow_html=True)
@@ -4052,6 +4135,106 @@ if selected_module == "__legacy_production":
         )
         plan_view = plan_view.rename(columns={"order_no":"İş Emri", "machine_code":"Makine", "product":"Ürün", "target":"Hedef", "produced":"Üretim", "priority":"Öncelik", "due_date":"Termin"})
         st.dataframe(plan_view[["İş Emri", "Makine", "Ürün", "Hedef", "Üretim", "Kalan", "Gerçekleşme %", "Öncelik", "Durum", "Termin"]], use_container_width=True, hide_index=True, height=250)
+
+
+    # =========================================================
+    # İŞGÜCÜ OLE
+    # =========================================================
+
+
+if selected_module == "👥 OLE":
+    st.markdown("""
+    <style>
+    .ole-formula{border:1px solid #cfe9da;border-radius:10px;background:linear-gradient(135deg,#f5fcf8,#eaf8f0);padding:12px 16px;color:#164f38;margin:2px 0 12px}.ole-formula b{font-size:.92rem}.ole-formula span{display:block;color:#648274;font-size:.72rem;margin-top:4px}.ole-title{font-size:1.12rem;font-weight:900;color:#0d4933}.ole-subtitle{font-size:.76rem;color:#668276;margin:-2px 0 12px}
+    </style>
+    <div class="ole-title">İşgücü OLE Analizi</div>
+    <div class="ole-subtitle">Operatör ve vardiya bazında işgücü etkinliğini mevcut MES kayıtlarından izleyin.</div>
+    <div class="ole-formula"><b>OLE = İşgücü Kullanılabilirliği × Performans × Kalite</b><span>Kullanılabilirlik operatör/personel/mola kaynaklı kayıpları; performans ideal çevrim süresini; kalite ise sağlam üretimi kullanır.</span></div>
+    """, unsafe_allow_html=True)
+
+    ole_filter_1, ole_filter_2, ole_filter_3 = st.columns(3, gap="small")
+    with ole_filter_1:
+        ole_shift_options = ["Tümü"] + sorted(labor_metrics["Vardiya"].dropna().astype(str).unique().tolist()) if not labor_metrics.empty else ["Tümü"]
+        ole_shift_filter = st.selectbox("Vardiya", ole_shift_options, key="ole_shift_filter")
+    with ole_filter_2:
+        ole_operator_options = ["Tümü"] + sorted(labor_metrics["Operatör"].dropna().astype(str).unique().tolist()) if not labor_metrics.empty else ["Tümü"]
+        ole_operator_filter = st.selectbox("Operatör", ole_operator_options, key="ole_operator_filter")
+    with ole_filter_3:
+        ole_status_filter = st.selectbox("Durum", ["Tümü", "İyi", "Takip", "Riskli", "Kritik"], key="ole_status_filter")
+
+    ole_view = labor_metrics.copy()
+    if ole_shift_filter != "Tümü":
+        ole_view = ole_view[ole_view["Vardiya"] == ole_shift_filter]
+    if ole_operator_filter != "Tümü":
+        ole_view = ole_view[ole_view["Operatör"] == ole_operator_filter]
+    if ole_status_filter != "Tümü":
+        ole_view = ole_view[ole_view["Durum"] == ole_status_filter]
+
+    if ole_view.empty:
+        st.info("Seçilen filtrelerde OLE hesaplanabilecek operatör kaydı bulunamadı.")
+    else:
+        ole_weights = ole_view["Planlı Süre"].clip(lower=0)
+        ole_weight_total = max(float(ole_weights.sum()), 1.0)
+        ole_availability_value = float((ole_view["Kullanılabilirlik"] * ole_weights).sum() / ole_weight_total)
+        ole_performance_value = float((ole_view["Performans"] * ole_weights).sum() / ole_weight_total)
+        ole_quality_value = float(ole_view["Sağlam Üretim"].sum() / max(float(ole_view["Üretim"].sum()), 1.0) * 100)
+        ole_value = ole_availability_value * ole_performance_value * ole_quality_value / 10000
+        ole_output_per_person = float(ole_view["Üretim"].sum() / max(ole_view["Operatör"].nunique(), 1))
+
+        ole_kpis = st.columns(6, gap="small")
+        ole_kpis[0].metric("Tahmini OLE", f"%{ole_value:.1f}")
+        ole_kpis[1].metric("Kullanılabilirlik", f"%{ole_availability_value:.1f}")
+        ole_kpis[2].metric("Performans", f"%{ole_performance_value:.1f}")
+        ole_kpis[3].metric("Kalite", f"%{ole_quality_value:.1f}")
+        ole_kpis[4].metric("İşgücü Kaybı", f"{ole_view['İşgücü Kaybı'].sum():.0f} dk")
+        ole_kpis[5].metric("Kişi Başı Üretim", f"{ole_output_per_person:,.0f}")
+
+        ole_left, ole_right = st.columns([1.25, 1], gap="small")
+        with ole_left:
+            with st.container(border=True):
+                st.markdown("#### Operatör Bazında OLE")
+                ole_chart_frame = ole_view.sort_values("OLE", ascending=True)
+                ole_operator_chart = px.bar(ole_chart_frame, x="OLE", y="Operatör", color="Durum", orientation="h", text=ole_chart_frame["OLE"].map(lambda value: f"%{value:.1f}"), color_discrete_map={"İyi":"#0a9b58", "Takip":"#35a7e8", "Riskli":"#f2ad2d", "Kritik":"#e94b4b"})
+                ole_operator_chart.add_vline(x=85, line_dash="dash", line_color="#0a9b58", annotation_text="Hedef %85")
+                ole_operator_chart.update_layout(height=285, margin=dict(l=0,r=8,t=8,b=0), legend=dict(orientation="h", y=1.12), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(title=None, range=[0,100]), yaxis_title=None)
+                st.plotly_chart(ole_operator_chart, use_container_width=True, config={"displayModeBar":False}, key="ole_operator_chart")
+        with ole_right:
+            with st.container(border=True):
+                st.markdown("#### OLE Bileşenleri")
+                ole_components = pd.DataFrame({"Bileşen": ["Kullanılabilirlik", "Performans", "Kalite", "OLE"], "Oran": [ole_availability_value, ole_performance_value, ole_quality_value, ole_value]})
+                ole_component_chart = px.bar(ole_components, x="Bileşen", y="Oran", text=ole_components["Oran"].map(lambda value: f"%{value:.1f}"), color="Bileşen", color_discrete_sequence=["#1ea76a", "#3ba8df", "#8ccf58", "#087847"])
+                ole_component_chart.update_layout(height=285, margin=dict(l=0,r=0,t=8,b=0), showlegend=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title=None, yaxis=dict(title=None, range=[0,100]))
+                st.plotly_chart(ole_component_chart, use_container_width=True, config={"displayModeBar":False}, key="ole_component_chart")
+
+        ole_table_left, ole_loss_right = st.columns([1.45, 1], gap="small")
+        with ole_table_left:
+            with st.container(border=True):
+                st.markdown("#### Operatör Detayları")
+                ole_table = ole_view.copy()
+                for ole_percent_column in ["Kullanılabilirlik", "Performans", "Kalite", "OLE"]:
+                    ole_table[ole_percent_column] = ole_table[ole_percent_column].map(lambda value: f"%{value:.1f}")
+                ole_table["Planlı Süre"] = ole_table["Planlı Süre"].map(lambda value: f"{value:.0f} dk")
+                ole_table["İşgücü Kaybı"] = ole_table["İşgücü Kaybı"].map(lambda value: f"{value:.0f} dk")
+                st.dataframe(ole_table, use_container_width=True, hide_index=True, height=235)
+        with ole_loss_right:
+            with st.container(border=True):
+                st.markdown("#### İşgücü Kayıp Nedenleri")
+                ole_loss_rows = q("SELECT reason,duration,event_at FROM downtime ORDER BY id DESC")
+                if not ole_loss_rows.empty:
+                    ole_loss_dated = filter_by_date_range(ole_loss_rows[ole_loss_rows["event_at"].notna()].copy(), "event_at")
+                    ole_loss_rows = pd.concat([ole_loss_dated, ole_loss_rows[ole_loss_rows["event_at"].isna()].copy()], ignore_index=True)
+                    ole_loss_mask = ole_loss_rows["reason"].fillna("").astype(str).str.lower().str.contains("operatör|operator|personel|mola|işgücü|iscilik|işçilik", regex=True)
+                    ole_loss_summary = ole_loss_rows[ole_loss_mask].groupby("reason", as_index=False)["duration"].sum().sort_values("duration", ascending=True)
+                else:
+                    ole_loss_summary = pd.DataFrame()
+                if ole_loss_summary.empty:
+                    st.success("Seçili tarihlerde kayıtlı işgücü kaybı yok.")
+                else:
+                    ole_loss_chart = px.bar(ole_loss_summary, x="duration", y="reason", orientation="h", text_auto=".0f", color_discrete_sequence=["#efad32"])
+                    ole_loss_chart.update_layout(height=235, margin=dict(l=0,r=0,t=5,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Dakika", yaxis_title=None)
+                    st.plotly_chart(ole_loss_chart, use_container_width=True, config={"displayModeBar":False}, key="ole_loss_chart")
+
+        st.info("OLE şu anda MES'teki makine ataması, üretim, ideal çevrim, hata ve operatör kaynaklı duruş kayıtlarından tahmini hesaplanır. Personel kartı/turnike ve mola verileri bağlandığında resmi işgücü OLE göstergesine dönüştürülebilir.")
 
 
     # =========================================================
@@ -5961,7 +6144,7 @@ if selected_module == "👥 Kullanıcı Yönetimi":
         role_options = ["admin", "operator", "maintenance", "quality"]
         role_names = {"admin":"ADMIN", "operator":"OPERATÖR", "maintenance":"BAKIM", "quality":"KALİTE"}
         permission_modules = [
-            "🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE",
+            "🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE",
             "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya",
             "🧰 Bakım Talebi", "✅ Kalite", "🔧 Bakım", "📦 Stok", "🔎 Detay",
             "📺 Andon Ekranı", "🔳 QR Makine"
@@ -6283,4 +6466,3 @@ st.markdown("""
     Daha akıllı üretim • Daha verimli süreçler • Daha güçlü gelecek
 </div>
 """, unsafe_allow_html=True)
-
