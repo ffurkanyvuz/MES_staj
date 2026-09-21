@@ -229,6 +229,39 @@ def audit_event(action, entity, details=""):
     )
 
 
+UNDO_WINDOW_SECONDS = 45
+
+
+def register_undo(label, operations):
+    """Son güvenli durum değişikliğini kısa süreliğine geri alınabilir yapar."""
+    st.session_state["pending_undo"] = {
+        "label": str(label),
+        "operations": [(sql, tuple(params)) for sql, params in operations],
+        "created_at": time.time(),
+    }
+
+
+def pending_undo_action():
+    action = st.session_state.get("pending_undo")
+    if not action:
+        return None
+    if time.time() - float(action.get("created_at", 0)) > UNDO_WINDOW_SECONDS:
+        st.session_state.pop("pending_undo", None)
+        return None
+    return action
+
+
+def perform_pending_undo():
+    action = pending_undo_action()
+    if not action:
+        return False
+    for sql, params in action["operations"]:
+        execute(sql, params)
+    audit_event("İşlemi geri aldı", "Kullanıcı işlemi", action["label"])
+    st.session_state.pop("pending_undo", None)
+    return True
+
+
 @st.cache_resource(show_spinner=False)
 def ensure_notification_schema(database_identity, schema_version="notifications-v1"):
     """Bildirim tablosunu SQLite ve PostgreSQL üzerinde güvenle oluşturur."""
@@ -2372,6 +2405,10 @@ if not st.session_state["authenticated"]:
 # stillerden sonra !important kurallarıyla uygulanarak işlevlere dokunmaz.
 if "dark_mode_enabled" not in st.session_state:
     st.session_state["dark_mode_enabled"] = False
+if "compact_view_enabled" not in st.session_state:
+    st.session_state["compact_view_enabled"] = False
+if "critical_focus_enabled" not in st.session_state:
+    st.session_state["critical_focus_enabled"] = False
 
 if st.session_state["dark_mode_enabled"]:
     st.markdown("""
@@ -2464,6 +2501,9 @@ if st.session_state["dark_mode_enabled"]:
         box-shadow:0 5px 17px rgba(0,0,0,.22) !important;
     }
     .notification-card.unread { background:#183426 !important; }
+    .data-freshness { background:#183426 !important; color:#cce9da !important; }
+    .critical-focus-strip { background:linear-gradient(90deg,#32191b,#18231d) !important; border-color:#704044 !important; color:#f2c9cb !important; }
+    .critical-focus-strip span { background:#261b1c !important; border-color:#704044 !important; color:#f2c9cb !important; }
     .notification-card b, .notification-card span,
     .dashboard-ring-title, .dashboard-ring-value, .dashboard-ring-note,
     .machine-code, .machine-stats, .machine-stats b,
@@ -2475,6 +2515,30 @@ if st.session_state["dark_mode_enabled"]:
     .dashboard-ring:after { background:#13251d !important; }
     .loss-rank { border-color:#294a3a !important; }
     .trex-footer { background:#13251d !important; border-color:#294a3a !important; color:#a9c8b8 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+if st.session_state["compact_view_enabled"]:
+    st.markdown("""
+    <style>
+    .main .block-container { max-width:1720px !important; padding-top:.38rem !important; padding-bottom:1.5rem !important; }
+    [data-testid="stVerticalBlock"] { gap:.48rem !important; }
+    [data-testid="stHorizontalBlock"] { gap:.55rem !important; }
+    div[data-testid="stMetric"] { padding:9px 12px !important; min-height:68px !important; border-radius:10px !important; }
+    div[data-testid="stMetricValue"] { font-size:1.38rem !important; }
+    div[data-testid="stMetricLabel"] { font-size:.72rem !important; }
+    div[data-testid="stVerticalBlockBorderWrapper"] { border-radius:9px !important; }
+    .trex-topbar { padding-bottom:4px !important; }
+    .trex-section, .trex-hero, .trex-info-card, .trex-brand-card,
+    .dashboard-ring-card, .machine-card, .trex-priority,
+    .sensor-v3-stat, .loss-action, .notification-card,
+    .mesv3-box, .mesv3-kpi, .home-v2-card, .home-v2-machine,
+    .home-v2-panel { padding:7px 9px !important; border-radius:8px !important; min-height:0 !important; }
+    .stButton > button { min-height:32px !important; padding:.28rem .65rem !important; }
+    div[data-testid="stDataFrame"] { border-radius:8px !important; font-size:.76rem !important; }
+    div[data-testid="stPlotlyChart"] { padding:3px !important; border-radius:8px !important; }
+    .nav-group-title { margin:9px 0 3px !important; }
+    section[data-testid="stSidebar"] div[data-testid="stButton"] button { min-height:32px !important; padding:5px 9px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -2524,6 +2588,43 @@ active_page_name, active_page_subtitle = module_page_info.get(
 # Tüm modüllerde tek satırlık kompakt üst bilgi alanı kullanılır.
 active_shift_header = active_shift_name()
 
+# Son canlı veri zamanını sensör tablosundan okur; veri yoksa üretim geçmişine düşer.
+freshness_rows = q("SELECT timestamp FROM sensors WHERE timestamp IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
+if freshness_rows.empty:
+    freshness_rows = q("SELECT timestamp FROM production_history WHERE timestamp IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
+latest_data_at = pd.to_datetime(freshness_rows.iloc[0]["timestamp"], errors="coerce") if not freshness_rows.empty else pd.NaT
+if pd.notna(latest_data_at):
+    if getattr(latest_data_at, "tzinfo", None) is not None:
+        latest_data_at = latest_data_at.tz_localize(None)
+    freshness_seconds = max(0, int((datetime.now() - latest_data_at.to_pydatetime()).total_seconds()))
+    if freshness_seconds < 60:
+        freshness_text = f"{freshness_seconds} sn önce"
+    elif freshness_seconds < 3600:
+        freshness_text = f"{freshness_seconds // 60} dk önce"
+    elif freshness_seconds < 86400:
+        freshness_text = f"{freshness_seconds // 3600} sa önce"
+    else:
+        freshness_text = latest_data_at.strftime("%d.%m.%Y %H:%M")
+    freshness_state = "live" if freshness_seconds <= 120 else ("warn" if freshness_seconds <= 900 else "stale")
+else:
+    freshness_text, freshness_state = "Veri bekleniyor", "stale"
+
+critical_focus_counts = {
+    "alarms": int(q("SELECT COUNT(*) AS n FROM alarms WHERE acknowledged=0 AND level='Kritik'").iloc[0]["n"]),
+    "machines": int(q("SELECT COUNT(*) AS n FROM machines WHERE status='Arızalı'").iloc[0]["n"]),
+    "orders": int(q("SELECT COUNT(*) AS n FROM work_orders WHERE status='Gecikmiş' OR (status!='Tamamlandı' AND due_date<?)", (str(date.today()),)).iloc[0]["n"]),
+    "maintenance": int(q("SELECT COUNT(*) AS n FROM maintenance WHERE status!='Tamamlandı' AND next_date<?", (str(date.today()),)).iloc[0]["n"]),
+}
+
+st.markdown(f"""
+<style>
+.data-freshness{{display:inline-flex;align-items:center;gap:5px;padding:3px 7px;border-radius:99px;background:#edf8f1;color:#38604c;font-size:.63rem;font-weight:750}}
+.data-freshness:before{{content:'';width:7px;height:7px;border-radius:50%;background:{'#22b66b' if freshness_state == 'live' else ('#e8a525' if freshness_state == 'warn' else '#e15359')};box-shadow:0 0 0 3px {'rgba(34,182,107,.13)' if freshness_state == 'live' else 'rgba(225,83,89,.12)'}}}
+.critical-focus-strip{{display:flex;align-items:center;gap:10px;padding:8px 11px;margin:0 0 8px;border:1px solid #f1b8ba;border-left:4px solid #e1484f;border-radius:9px;background:linear-gradient(90deg,#fff2f2,#fff);color:#663236}}
+.critical-focus-strip strong{{font-size:.78rem;color:#b72f36}}.critical-focus-strip span{{font-size:.67rem;padding:3px 7px;border-radius:99px;background:#fff;border:1px solid #f0c8ca}}
+</style>
+""", unsafe_allow_html=True)
+
 
 @st.fragment(run_every="20s")
 def notification_refresh_tick():
@@ -2550,6 +2651,7 @@ with header_left:
         </div>
         <div class="trex-compact-meta">
             <span>📅 {datetime.now():%d %B %Y · %H:%M}</span>
+            <span class="data-freshness">Veri · {html.escape(freshness_text)}</span>
             <b>👤 {st.session_state.get("full_name", "MES Kullanıcısı")}</b>
         </div>
     </div>
@@ -2572,10 +2674,19 @@ with header_notification:
             current_username = st.session_state.get("username", "")
             current_role = st.session_state.get("role", "")
             if unread_notification_count and st.button("Tümünü okundu işaretle", use_container_width=True, key="notification_read_all"):
+                unread_before = q("""
+                    SELECT id,is_read,read_at FROM notifications
+                    WHERE is_read=0 AND (recipient_username=? OR recipient_role=?)
+                """, (current_username, current_role))
                 execute("""
                     UPDATE notifications SET is_read=1,read_at=?
                     WHERE is_read=0 AND (recipient_username=? OR recipient_role=?)
                 """, (now(), current_username, current_role))
+                if not unread_before.empty:
+                    register_undo(
+                        f"{len(unread_before)} bildirim okundu işaretlendi",
+                        [("UPDATE notifications SET is_read=?,read_at=? WHERE id=?", (int(row["is_read"] or 0), row["read_at"], int(row["id"]))) for _, row in unread_before.iterrows()]
+                    )
                 st.rerun()
             for _, notification in header_notifications.iterrows():
                 notification_id = int(notification["id"])
@@ -2591,28 +2702,69 @@ with header_notification:
                 )
                 notification_actions = st.columns([1.15, .9, .9], gap="small")
                 if notification_actions[0].button("Göreve Git", key=f"notification_open_{notification_id}", use_container_width=True):
+                    previous_read = int(notification["is_read"] or 0)
+                    previous_read_at = notification["read_at"]
                     execute("""
                         UPDATE notifications SET is_read=1,read_at=?
                         WHERE id=? AND (recipient_username=? OR recipient_role=?)
                     """, (now(), notification_id, current_username, current_role))
+                    if previous_read == 0:
+                        register_undo(
+                            f'{notification["title"]} bildirimi okundu',
+                            [("UPDATE notifications SET is_read=?,read_at=? WHERE id=?", (previous_read, previous_read_at, notification_id))]
+                        )
                     target_module = str(notification["target_module"] or "🏠 Ana Sayfa")
                     st.session_state["selected_module"] = target_module if can_access_module(target_module) else "🏠 Ana Sayfa"
                     if notification["machine_code"]:
                         st.session_state["notification_machine_filter"] = str(notification["machine_code"])
                     st.rerun()
                 if notification_actions[1].button("Okundu", key=f"notification_read_{notification_id}", use_container_width=True):
+                    previous_read = int(notification["is_read"] or 0)
+                    previous_read_at = notification["read_at"]
                     execute("""
                         UPDATE notifications SET is_read=1,read_at=?
                         WHERE id=? AND (recipient_username=? OR recipient_role=?)
                     """, (now(), notification_id, current_username, current_role))
+                    if previous_read == 0:
+                        register_undo(
+                            f'{notification["title"]} bildirimi okundu',
+                            [("UPDATE notifications SET is_read=?,read_at=? WHERE id=?", (previous_read, previous_read_at, notification_id))]
+                        )
                     st.rerun()
                 if notification_actions[2].button("Tamamla", key=f"notification_done_{notification_id}", use_container_width=True):
+                    previous_notification_state = (
+                        int(notification["is_read"] or 0), int(notification["is_completed"] or 0),
+                        notification["read_at"], notification["completed_at"], notification_id
+                    )
                     execute("""
                         UPDATE notifications SET is_read=1,is_completed=1,read_at=?,completed_at=?
                         WHERE id=? AND (recipient_username=? OR recipient_role=?)
                     """, (now(), now(), notification_id, current_username, current_role))
+                    register_undo(
+                        f'{notification["title"]} bildirimi tamamlandı',
+                        [("UPDATE notifications SET is_read=?,is_completed=?,read_at=?,completed_at=? WHERE id=?", previous_notification_state)]
+                    )
                     audit_event("Bildirimi tamamladı", f"Bildirim #{notification_id}", str(notification["title"]))
                     st.rerun()
+
+if st.session_state.get("critical_focus_enabled", False):
+    st.markdown(
+        f'<div class="critical-focus-strip"><strong>🚨 Kritik Odak Açık</strong>'
+        f'<span>{critical_focus_counts["alarms"]} kritik alarm</span>'
+        f'<span>{critical_focus_counts["machines"]} arızalı makine</span>'
+        f'<span>{critical_focus_counts["orders"]} geciken iş</span>'
+        f'<span>{critical_focus_counts["maintenance"]} geciken bakım</span></div>',
+        unsafe_allow_html=True,
+    )
+    focus_alarm_col, focus_machine_col, focus_work_col, focus_maintenance_col, _ = st.columns([1, 1, 1, 1, 3.2], gap="small")
+    if focus_alarm_col.button("Kritik alarmlar", key="focus_open_alarms", use_container_width=True):
+        st.session_state["selected_module"] = "🚨 Alarmlar"; st.rerun()
+    if focus_machine_col.button("Arızalı makineler", key="focus_open_machines", use_container_width=True):
+        st.session_state["selected_module"] = "🏭 Makine"; st.rerun()
+    if focus_work_col.button("Geciken işler", key="focus_open_orders", use_container_width=True):
+        st.session_state["selected_module"] = "📋 İş Emirleri"; st.rerun()
+    if focus_maintenance_col.button("Geciken bakımlar", key="focus_open_maintenance", use_container_width=True):
+        st.session_state["selected_module"] = "🔧 Bakım"; st.rerun()
 
 with st.sidebar:
     role_label = ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")
@@ -2629,6 +2781,24 @@ with st.sidebar:
         key="dark_mode_enabled",
         help="Tüm MES ekranlarında göz yormayan koyu renk temasını açar."
     )
+    st.toggle(
+        "↔️ Kompakt Görünüm",
+        key="compact_view_enabled",
+        help="Kart ve tablo aralıklarını küçülterek aynı ekranda daha fazla veri gösterir."
+    )
+    st.toggle(
+        "🚨 Kritik Odak Modu",
+        key="critical_focus_enabled",
+        help="Kritik alarm, arızalı makine ve geciken işleri her sayfanın üstünde öne çıkarır."
+    )
+    undo_action = pending_undo_action()
+    if undo_action:
+        undo_seconds_left = max(1, UNDO_WINDOW_SECONDS - int(time.time() - undo_action["created_at"]))
+        st.caption(f'↩ {undo_action["label"]} · {undo_seconds_left} sn')
+        if st.button("Son işlemi geri al", key="undo_last_action", use_container_width=True):
+            if perform_pending_undo():
+                st.success("İşlem geri alındı.")
+                st.rerun()
     if is_admin():
         unsafe_accounts = default_password_accounts()
         if unsafe_accounts:
@@ -4046,8 +4216,19 @@ if selected_module == "🚨 Alarmlar":
                         st.session_state["alarm_v3_detail_open"] = True
                 with action_confirm_v3:
                     if st.button("Onayla", key="alarm_v3_ack_button", type="primary", use_container_width=True):
+                        previous_alarm_action_v3 = q("SELECT assignee,note,assigned_at,resolved_at,status FROM alarm_actions WHERE alarm_id=?", (int(selected_alarm_id_v3),))
                         execute("UPDATE alarms SET acknowledged=1 WHERE id=?", (int(selected_alarm_id_v3),))
                         execute("INSERT INTO alarm_actions(alarm_id,assignee,note,assigned_at,resolved_at,status) VALUES(?,?,?,?,?,?) ON CONFLICT(alarm_id) DO UPDATE SET assigned_at=excluded.assigned_at,resolved_at=excluded.resolved_at,status=excluded.status", (int(selected_alarm_id_v3), "Sistem onayı", "Alarm onaylandı", now(), now(), "Onaylandı"))
+                        alarm_undo_operations_v3 = [("UPDATE alarms SET acknowledged=0 WHERE id=?", (int(selected_alarm_id_v3),))]
+                        if previous_alarm_action_v3.empty:
+                            alarm_undo_operations_v3.append(("DELETE FROM alarm_actions WHERE alarm_id=?", (int(selected_alarm_id_v3),)))
+                        else:
+                            previous_action_v3 = previous_alarm_action_v3.iloc[0]
+                            alarm_undo_operations_v3.append((
+                                "INSERT INTO alarm_actions(alarm_id,assignee,note,assigned_at,resolved_at,status) VALUES(?,?,?,?,?,?) ON CONFLICT(alarm_id) DO UPDATE SET assignee=excluded.assignee,note=excluded.note,assigned_at=excluded.assigned_at,resolved_at=excluded.resolved_at,status=excluded.status",
+                                (int(selected_alarm_id_v3), previous_action_v3["assignee"], previous_action_v3["note"], previous_action_v3["assigned_at"], previous_action_v3["resolved_at"], previous_action_v3["status"])
+                            ))
+                        register_undo(f"Alarm #{int(selected_alarm_id_v3)} onaylandı", alarm_undo_operations_v3)
                         audit_event("Alarmı onayladı", f"Alarm #{int(selected_alarm_id_v3)}", "Alarm merkezi hızlı onay")
                         st.success("Alarm onaylandı.")
                         st.rerun()
@@ -4990,6 +5171,8 @@ if selected_module == "🔧 Bakım":
             st.rerun()
         if submitted:
             selected = active_records[active_records["id"] == record_id].iloc[0]
+            previous_maintenance = q("SELECT status,technician,maintenance_date,next_date FROM maintenance WHERE id=?", (int(record_id),)).iloc[0]
+            previous_machine = q("SELECT status,last_maintenance,next_maintenance FROM machines WHERE machine_code=?", (selected["machine_code"],)).iloc[0]
             if action == "Bakımı başlat":
                 execute("UPDATE maintenance SET status=?,technician=? WHERE id=?", ("Bakımda", technician, int(record_id)))
                 execute("UPDATE machines SET status='Arızalı' WHERE machine_code=?", (selected["machine_code"],))
@@ -5000,6 +5183,19 @@ if selected_module == "🔧 Bakım":
                 execute("UPDATE maintenance SET status=?,technician=?,maintenance_date=?,next_date=? WHERE id=?", ("Tamamlandı", technician, completed_date, str(next_service), int(record_id)))
                 execute("UPDATE machines SET status=?,last_maintenance=?,next_maintenance=? WHERE machine_code=?", (machine_status, completed_date, str(next_service), selected["machine_code"]))
                 audit_event("Bakımı tamamladı", selected["machine_code"], f"{technician} · {machine_status}")
+            register_undo(
+                f'{selected["machine_code"]} bakım durumu güncellendi',
+                [
+                    ("UPDATE maintenance SET status=?,technician=?,maintenance_date=?,next_date=? WHERE id=?", (
+                        previous_maintenance["status"], previous_maintenance["technician"],
+                        previous_maintenance["maintenance_date"], previous_maintenance["next_date"], int(record_id)
+                    )),
+                    ("UPDATE machines SET status=?,last_maintenance=?,next_maintenance=? WHERE machine_code=?", (
+                        previous_machine["status"], previous_machine["last_maintenance"],
+                        previous_machine["next_maintenance"], selected["machine_code"]
+                    )),
+                ],
+            )
             st.session_state["maintenance_action_open"] = False
             st.session_state["maintenance_record_updated"] = True
             st.rerun()
