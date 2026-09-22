@@ -1,5 +1,7 @@
 import random
 import sqlite3
+import statistics
+import uuid
 from datetime import datetime
 
 from fastapi import FastAPI
@@ -93,6 +95,14 @@ def get_alarms():
 @app.post("/simulate")
 def simulate_factory():
     c = conn()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS spc_measurements(
+            id INTEGER PRIMARY KEY,machine_id INTEGER,machine_code TEXT NOT NULL,
+            product TEXT NOT NULL,measurement_name TEXT NOT NULL,
+            measurement_value REAL NOT NULL,unit TEXT NOT NULL,timestamp TEXT NOT NULL,
+            spec_low REAL,spec_high REAL
+        )
+    """)
 
     machines = c.execute("""
         SELECT *
@@ -127,6 +137,7 @@ def simulate_factory():
         status = machine["status"]
 
         new_status = status
+        spc_alarm = None
 
         # ---------------------------------------------
         # ÜRETİM
@@ -201,6 +212,30 @@ def simulate_factory():
                 defective + random.choice([0, 0, 1]),
                 production
             )
+
+        if production > int(machine["production"]) and new_status == "Çalışıyor":
+            recent_rows = c.execute("""
+                SELECT measurement_value FROM spc_measurements
+                WHERE machine_code=? AND measurement_name='Çap'
+                ORDER BY timestamp DESC LIMIT 20
+            """, (machine["machine_code"],)).fetchall()
+            recent_values = [float(item["measurement_value"]) for item in recent_rows]
+            drift = .018 if machine["machine_code"] == "CNC-02" and random.random() < .35 else 0
+            spc_value = round(25 + random.uniform(-.035, .035) + drift, 3)
+            c.execute("""
+                INSERT INTO spc_measurements(
+                    id,machine_id,machine_code,product,measurement_name,
+                    measurement_value,unit,timestamp,spec_low,spec_high
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """, (int(uuid.uuid4().int % 2_000_000_000) or 1, machine["id"], machine["machine_code"],
+                  machine["product"] or "Tanımsız Ürün", "Çap", spc_value, "mm", now(), 24.90, 25.10))
+            if len(recent_values) >= 5:
+                center = statistics.mean(recent_values)
+                deviation = statistics.stdev(recent_values)
+                outside_control = deviation > 0 and abs(spc_value - center) > 3 * deviation
+                outside_spec = spc_value < 24.90 or spc_value > 25.10
+                if outside_control or outside_spec:
+                    spc_alarm = (f"SPC: Çap ölçümü kontrol limitini aştı ({spc_value:.3f} mm)", "Kritik" if outside_spec else "Uyarı")
 
         planned_time = min(
             planned_time,
@@ -412,6 +447,8 @@ def simulate_factory():
             # -----------------------------------------
 
             alarm_list = []
+            if spc_alarm:
+                alarm_list.append(spc_alarm)
 
             if temperature >= 85:
                 alarm_list.append(
@@ -514,3 +551,4 @@ def simulate_factory():
         "timestamp": now(),
         "machines": changed
     }
+
