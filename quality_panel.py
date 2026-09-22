@@ -1,13 +1,52 @@
-"""Kalite yönetim paneli; verileri mevcut kalite kayıtlarından üretir."""
+"""TREX MES kalite yönetimi: genel görünüm, hata, SPC ve Pareto analizleri."""
 from datetime import date, timedelta
 import io
+import uuid
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 
-def render_quality_panel(query):
+GREEN = "#0b9257"
+RED = "#e65258"
+AMBER = "#eea629"
+BLUE = "#349bc7"
+
+
+def _chart(figure, key, height=285):
+    figure.update_layout(
+        height=height, margin=dict(l=12, r=12, t=28, b=34),
+        font=dict(size=10, color="#365b49"), paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.12),
+    )
+    st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False}, key=key)
+
+
+def _metric_cards(items):
+    columns = st.columns(len(items), gap="small")
+    for column, (label, value, note, colour) in zip(columns, items):
+        column.markdown(
+            f'<div class="ql-stat" style="--ql-color:{colour}"><small>{label}</small>'
+            f'<b>{value}</b><span>{note}</span></div>', unsafe_allow_html=True,
+        )
+
+
+def _quality_summaries(data):
+    total = float(data["produced"].sum())
+    defective = min(float(data["defective"].sum()), total) if total else float(data["defective"].sum())
+    good = max(total - defective, 0)
+    rate = good / max(total, 1) * 100
+    machine = data.groupby("machine_code", as_index=False).agg(
+        **{"Toplam Üretim": ("produced", "sum"), "Hatalı": ("defective", "sum")}
+    )
+    machine["Uygun"] = (machine["Toplam Üretim"] - machine["Hatalı"]).clip(lower=0)
+    machine["Kalite Oranı"] = (machine["Uygun"] / machine["Toplam Üretim"].replace(0, 1) * 100).clip(0, 100)
+    reasons = data[data["defective"] > 0].groupby("defect_reason")["defective"].sum().sort_values(ascending=False)
+    return total, good, defective, rate, machine, reasons
+
+
+def render_quality_panel(query, execute, machines, has_role):
     records = query("""
         SELECT q.id,q.machine_code,q.product,q.produced,q.defective,
                COALESCE(q.defect_reason,'Belirtilmemiş') AS defect_reason,q.timestamp,
@@ -15,169 +54,200 @@ def render_quality_panel(query):
         FROM quality q LEFT JOIN machines m ON m.machine_code=q.machine_code
         ORDER BY q.id DESC
     """)
-    records["produced"] = pd.to_numeric(records["produced"], errors="coerce").fillna(0).clip(lower=0)
-    records["defective"] = pd.to_numeric(records["defective"], errors="coerce").fillna(0).clip(lower=0)
+    for column in ["produced", "defective"]:
+        records[column] = pd.to_numeric(records[column], errors="coerce").fillna(0).clip(lower=0)
     records["_time"] = pd.to_datetime(records["timestamp"], errors="coerce")
-    records["_date"] = records["_time"].dt.date
 
-    st.subheader("Kalite Yönetimi")
     st.markdown("""
     <style>
-      .ql-stat{min-height:91px;background:linear-gradient(120deg,#fff,#eff9f5);border:1px solid #d6ebe2;
-        border-left:4px solid var(--ql-color);border-radius:9px;padding:11px 13px;box-sizing:border-box}
-      .ql-stat small{display:block;color:#49675a;font-size:11px;font-weight:700}.ql-stat b{display:block;color:#0b5239;font-size:24px;line-height:34px}
-      .ql-stat span{font-size:10px;color:#688377}.ql-title{font-size:14px;font-weight:800;color:#12583e;margin-bottom:9px}
-      .ql-alert{padding:8px 9px;margin:6px 0;border-left:3px solid var(--ql-alert);background:#fff;border-radius:5px;font-size:11px;color:#315744}
+    .ql-stat{min-height:78px;background:linear-gradient(125deg,#fff,#eff9f4);border:1px solid #d6ebe2;border-left:4px solid var(--ql-color);border-radius:9px;padding:9px 12px;box-sizing:border-box}
+    .ql-stat small{display:block;color:#49675a;font-size:10px;font-weight:800}.ql-stat b{display:block;color:#0b5239;font-size:21px;line-height:29px}.ql-stat span{font-size:9px;color:#688377}
+    .ql-panel-title{font-size:13px;font-weight:850;color:#12583e;margin-bottom:7px}.spc-state{padding:11px 14px;border-radius:9px;border:1px solid var(--state-border);background:var(--state-bg);color:var(--state-text);font-weight:850;margin:5px 0 10px}.spc-note{font-size:11px;color:#638071}
+    div[data-baseweb="tab-list"]{gap:5px;border-bottom:1px solid #d9ece2}button[data-baseweb="tab"]{height:40px;padding:0 17px;border-radius:8px 8px 0 0;font-weight:750}
     </style>
     """, unsafe_allow_html=True)
 
-    stat_area = st.container()
-    filters = st.columns([1.45, 1, 1, 1, 1.5, .85])
-    with filters[0]:
-        chosen_dates = st.date_input("Tarih aralığı", value=(date.today() - timedelta(days=6), date.today()), key="quality_dates_v4")
-    with filters[1]:
-        chosen_machine = st.selectbox("Makine", ["Tümü"] + sorted(records["machine_code"].dropna().astype(str).unique().tolist()), key="quality_machine_v4")
-    with filters[2]:
-        chosen_product = st.selectbox("Ürün", ["Tümü"] + sorted(records["product"].dropna().astype(str).unique().tolist()), key="quality_product_v4")
-    with filters[3]:
-        chosen_shift = st.selectbox("Güncel vardiya", ["Tümü"] + sorted(records["shift"].dropna().astype(str).unique().tolist()), key="quality_shift_v4")
-    with filters[4]:
-        quality_search = st.text_input("Kalite kaydı ara", placeholder="Ürün, hata veya makine...", key="quality_search_v4")
-    with filters[5]:
+    filter_columns = st.columns([1.35, 1, 1, 1.35, .78], gap="small")
+    with filter_columns[0]:
+        selected_dates = st.date_input("Tarih aralığı", (date.today() - timedelta(days=30), date.today()), key="quality_dates_spc")
+    with filter_columns[1]:
+        selected_machine = st.selectbox("Makine", ["Tümü"] + sorted(records["machine_code"].dropna().astype(str).unique().tolist()), key="quality_machine_spc")
+    with filter_columns[2]:
+        selected_product = st.selectbox("Ürün", ["Tümü"] + sorted(records["product"].dropna().astype(str).unique().tolist()), key="quality_product_spc")
+    with filter_columns[3]:
+        search = st.text_input("Kayıt ara", placeholder="Makine, ürün veya hata...", key="quality_search_spc")
+    with filter_columns[4]:
         st.write("")
-        if st.button("＋ Yeni Kayıt", type="primary", use_container_width=True, key="quality_new_v4"):
+        if st.button("Yeni Kayıt", type="primary", use_container_width=True, key="quality_new_spc"):
             st.session_state["quality_new_open"] = True
 
-    show_all_quality = st.checkbox("Tüm tarihleri göster", key="quality_all_dates_v4")
-    if not isinstance(chosen_dates, (tuple, list)):
-        chosen_dates = (chosen_dates, chosen_dates)
-    quality_start, quality_end = (chosen_dates[0], chosen_dates[-1]) if chosen_dates else (date.today(), date.today())
-    data = records.copy()
-    if not show_all_quality:
-        data = data[data["_time"].between(pd.Timestamp(quality_start), pd.Timestamp(quality_end) + pd.Timedelta(days=1), inclusive="left")]
-    if chosen_machine != "Tümü": data = data[data["machine_code"] == chosen_machine]
-    if chosen_product != "Tümü": data = data[data["product"] == chosen_product]
-    if chosen_shift != "Tümü": data = data[data["shift"] == chosen_shift]
-    if quality_search.strip():
-        search_text = data["machine_code"].fillna("").astype(str) + " " + data["product"].fillna("").astype(str) + " " + data["defect_reason"].fillna("").astype(str)
-        data = data[search_text.str.contains(quality_search.strip(), case=False, regex=False)]
+    if not isinstance(selected_dates, (tuple, list)):
+        selected_dates = (selected_dates, selected_dates)
+    start_date, end_date = selected_dates[0], selected_dates[-1]
+    data = records[records["_time"].between(pd.Timestamp(start_date), pd.Timestamp(end_date) + pd.Timedelta(days=1), inclusive="left")].copy()
+    if selected_machine != "Tümü":
+        data = data[data["machine_code"] == selected_machine]
+    if selected_product != "Tümü":
+        data = data[data["product"] == selected_product]
+    if search.strip():
+        haystack = data[["machine_code", "product", "defect_reason"]].fillna("").astype(str).agg(" ".join, axis=1)
+        data = data[haystack.str.contains(search.strip(), case=False, regex=False)]
 
-    total_produced = float(data["produced"].sum())
-    total_defective = min(float(data["defective"].sum()), total_produced) if total_produced else float(data["defective"].sum())
-    total_good = max(total_produced - total_defective, 0)
-    quality_rate = total_good / max(total_produced, 1) * 100
-    defect_rate = total_defective / max(total_produced, 1) * 100
-    with stat_area:
-        stat_cols = st.columns(5)
-        stats = [
-            ("Toplam Üretim", f"{int(total_produced):,}", "Seçili kayıtlar", "#169b68"),
-            ("Sağlam Üretim", f"{int(total_good):,}", "Hatasız adet", "#169b68"),
-            ("Hatalı Üretim", f"{int(total_defective):,}", "Kayıtlı hata", "#e45e65"),
-            ("Kalite Oranı", f"%{quality_rate:.1f}", "Sağlam / toplam", "#169b68"),
-            ("Hata Oranı", f"%{defect_rate:.1f}", "Hatalı / toplam", "#e3a135"),
-        ]
-        for column, (label, value, note, colour) in zip(stat_cols, stats):
-            column.markdown(f'<div class="ql-stat" style="--ql-color:{colour}"><small>{label}</small><b>{value}</b><span>{note}</span></div>', unsafe_allow_html=True)
+    total, good, defective, quality_rate, machine_summary, reason_totals = _quality_summaries(data)
+    _metric_cards([
+        ("Kontrol Edilen", f"{int(total):,}", "Seçili dönem", GREEN),
+        ("Uygun Ürün", f"{int(good):,}", "Hatasız adet", GREEN),
+        ("Hatalı Ürün", f"{int(defective):,}", "Toplam hata", RED),
+        ("Kalite Oranı", f"%{quality_rate:.1f}", "Uygun / toplam", GREEN),
+        ("Aktif Makine", f"{machine_summary['machine_code'].nunique()}", "Kalite kaydı olan", BLUE),
+    ])
 
-    def title(text):
-        st.markdown(f'<div class="ql-title">{text}</div>', unsafe_allow_html=True)
+    overview_tab, defect_tab, spc_tab, pareto_tab = st.tabs(["Genel Bakış", "Hata Analizi", "SPC Analizi", "Pareto Analizi"])
 
-    def show_chart(figure, key, height=215):
-        figure.update_layout(height=height, margin=dict(l=10, r=12, t=18, b=34), font=dict(size=10, color="#365b49"), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", font=dict(size=9)))
-        st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False}, key=key)
+    with overview_tab:
+        left, right = st.columns([1.15, 1], gap="small")
+        with left, st.container(border=True):
+            st.markdown('<div class="ql-panel-title">Makine Bazında Kalite Oranı</div>', unsafe_allow_html=True)
+            if machine_summary.empty:
+                st.info("Seçili filtrelerde kalite verisi yok.")
+            else:
+                figure = go.Figure(go.Bar(x=machine_summary["machine_code"], y=machine_summary["Kalite Oranı"], marker_color=GREEN, text=machine_summary["Kalite Oranı"].map(lambda x: f"%{x:.1f}"), textposition="outside"))
+                figure.update_yaxes(range=[0, 105], ticksuffix="%")
+                _chart(figure, "quality_machine_rate_spc")
+        with right, st.container(border=True):
+            st.markdown('<div class="ql-panel-title">Makine Kalite Özeti</div>', unsafe_allow_html=True)
+            table = machine_summary.rename(columns={"machine_code": "Makine"}).copy()
+            table["Kalite Oranı"] = table["Kalite Oranı"].map(lambda x: f"%{x:.1f}")
+            st.dataframe(table[["Makine", "Toplam Üretim", "Uygun", "Hatalı", "Kalite Oranı"]], hide_index=True, use_container_width=True, height=310)
 
-    defect_data = data[data["defective"] > 0].copy()
-    reason_totals = defect_data.groupby("defect_reason")["defective"].sum().sort_values(ascending=False)
-    machine_summary = data.groupby("machine_code", as_index=False).agg(Üretim=("produced", "sum"), Hatalı=("defective", "sum"))
-    machine_summary["Kalite"] = ((machine_summary["Üretim"] - machine_summary["Hatalı"]) / machine_summary["Üretim"].replace(0, 1) * 100).clip(0, 100)
-    machine_summary["Hata"] = (machine_summary["Hatalı"] / machine_summary["Üretim"].replace(0, 1) * 100).clip(0, 100)
+    with defect_tab:
+        top_defect = reason_totals.index[0] if not reason_totals.empty else "—"
+        defect_columns = st.columns(3)
+        defect_columns[0].metric("Toplam Hata", f"{int(reason_totals.sum()):,}")
+        defect_columns[1].metric("En Çok Görülen Hata", top_defect)
+        defect_columns[2].metric("Hata Türü Sayısı", len(reason_totals))
+        defect_left, defect_right = st.columns(2, gap="small")
+        with defect_left, st.container(border=True):
+            st.markdown('<div class="ql-panel-title">Hata Türlerine Göre Dağılım</div>', unsafe_allow_html=True)
+            if reason_totals.empty:
+                st.success("Seçili dönemde hata yok.")
+            else:
+                donut = go.Figure(go.Pie(labels=reason_totals.index, values=reason_totals.values, hole=.62, marker_colors=[RED, AMBER, BLUE, "#8b6ad3", "#54b889"]))
+                _chart(donut, "quality_defect_donut_spc")
+        with defect_right, st.container(border=True):
+            st.markdown('<div class="ql-panel-title">Makine Bazında Hata</div>', unsafe_allow_html=True)
+            ranking = machine_summary.sort_values("Hatalı")
+            if ranking.empty:
+                st.caption("Makine hata kaydı yok.")
+            else:
+                _chart(go.Figure(go.Bar(x=ranking["Hatalı"], y=ranking["machine_code"], orientation="h", marker_color=RED, text=ranking["Hatalı"])), "quality_defect_machine_spc")
 
-    top_row = st.columns([1, 1.18, 1.15], gap="small")
-    with top_row[0], st.container(border=True):
-        title("Hata Türleri Dağılımı")
+    with spc_tab:
+        spc_records = query("""
+            SELECT id,machine_id,machine_code,product,measurement_name,measurement_value,
+                   unit,timestamp,spec_low,spec_high
+            FROM spc_measurements ORDER BY timestamp,id
+        """)
+        spc_records["measurement_value"] = pd.to_numeric(spc_records["measurement_value"], errors="coerce")
+        spc_records["timestamp"] = pd.to_datetime(spc_records["timestamp"], errors="coerce")
+        spc_records = spc_records.dropna(subset=["measurement_value", "timestamp"])
+
+        if st.session_state.get("spc_new_open", False):
+            with st.container(border=True):
+                st.markdown('<div class="ql-panel-title">Yeni SPC Ölçümü</div>', unsafe_allow_html=True)
+                if not has_role("admin", "quality"):
+                    st.info("Ölçüm girişi için kalite veya yönetici yetkisi gerekir.")
+                elif machines.empty:
+                    st.warning("Ölçüm bağlanabilecek makine yok.")
+                else:
+                    with st.form("spc_measurement_form"):
+                        form_cols = st.columns(4)
+                        machine_code = form_cols[0].selectbox("Makine", machines["machine_code"].tolist())
+                        machine_row = machines[machines["machine_code"] == machine_code].iloc[0]
+                        product = form_cols[1].text_input("Ürün", str(machine_row["product"] or "Tanımsız Ürün"))
+                        characteristic = form_cols[2].text_input("Karakteristik", "Çap")
+                        unit = form_cols[3].text_input("Birim", "mm")
+                        value_cols = st.columns(3)
+                        measurement_value = value_cols[0].number_input("Ölçüm değeri", value=25.0, format="%.4f")
+                        spec_low = value_cols[1].number_input("LSL", value=24.90, format="%.4f")
+                        spec_high = value_cols[2].number_input("USL", value=25.10, format="%.4f")
+                        saved = st.form_submit_button("Ölçümü Kaydet", type="primary", use_container_width=True)
+                    if saved:
+                        if spec_low >= spec_high:
+                            st.error("LSL, USL değerinden küçük olmalıdır.")
+                        else:
+                            execute("""INSERT INTO spc_measurements(id,machine_id,machine_code,product,measurement_name,measurement_value,unit,timestamp,spec_low,spec_high) VALUES(?,?,?,?,?,?,?,?,?,?)""", (int(uuid.uuid4().int % 2_000_000_000) or 1, int(machine_row["id"]), machine_code, product.strip(), characteristic.strip(), float(measurement_value), unit.strip(), pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), float(spec_low), float(spec_high)))
+                            st.session_state["spc_new_open"] = False
+                            st.session_state["spc_saved"] = True
+                            st.rerun()
+                if st.button("İptal", key="spc_measurement_cancel"):
+                    st.session_state["spc_new_open"] = False
+                    st.rerun()
+        if st.session_state.pop("spc_saved", False):
+            st.success("SPC ölçümü kaydedildi.")
+
+        spc_filter_cols = st.columns([1, 1, 1, .65], gap="small")
+        machine_options = sorted(spc_records["machine_code"].astype(str).unique().tolist())
+        if not machine_options:
+            st.info("Henüz SPC ölçümü yok. Yeni Ölçüm ile ilk kaydı oluşturabilirsin.")
+        else:
+            spc_machine = spc_filter_cols[0].selectbox("SPC Makine", machine_options, key="spc_machine")
+            machine_spc = spc_records[spc_records["machine_code"] == spc_machine]
+            spc_product = spc_filter_cols[1].selectbox("SPC Ürün", sorted(machine_spc["product"].astype(str).unique()), key="spc_product")
+            product_spc = machine_spc[machine_spc["product"] == spc_product]
+            spc_characteristic = spc_filter_cols[2].selectbox("Karakteristik", sorted(product_spc["measurement_name"].astype(str).unique()), key="spc_characteristic")
+            with spc_filter_cols[3]:
+                st.write("")
+                if st.button("Yeni Ölçüm", type="primary", use_container_width=True, key="spc_new_button"):
+                    st.session_state["spc_new_open"] = True
+                    st.rerun()
+            spc_view = product_spc[product_spc["measurement_name"] == spc_characteristic].sort_values("timestamp").tail(100).copy()
+            values = spc_view["measurement_value"]
+            center = float(values.mean())
+            deviation = float(values.std(ddof=1)) if len(values) > 1 else 0.0
+            ucl, lcl = center + 3 * deviation, center - 3 * deviation
+            spec_low = float(spc_view["spec_low"].dropna().iloc[-1]) if spc_view["spec_low"].notna().any() else None
+            spec_high = float(spc_view["spec_high"].dropna().iloc[-1]) if spc_view["spec_high"].notna().any() else None
+            outside = (values > ucl) | (values < lcl)
+            if spec_low is not None:
+                outside |= values < spec_low
+            if spec_high is not None:
+                outside |= values > spec_high
+            outside_count = int(outside.sum())
+            state_style = ("#ffe9e9", "#efbcbc", "#a3272d") if outside_count else ("#e9f8ef", "#bfe6ce", "#087746")
+            state_text = f"Proses kontrol dışında · {outside_count} ölçüm limit dışı" if outside_count else "Proses kontrol altında"
+            st.markdown(f'<div class="spc-state" style="--state-bg:{state_style[0]};--state-border:{state_style[1]};--state-text:{state_style[2]}">{state_text}</div>', unsafe_allow_html=True)
+            _metric_cards([("Ortalama / CL", f"{center:.3f}", spc_view["unit"].iloc[-1], GREEN), ("UCL", f"{ucl:.3f}", "+3σ", AMBER), ("LCL", f"{lcl:.3f}", "−3σ", AMBER), ("Kontrol Dışı", str(outside_count), f"{len(spc_view)} ölçüm", RED if outside_count else GREEN), ("Standart Sapma", f"{deviation:.4f}", "σ", BLUE)])
+            control = go.Figure()
+            control.add_trace(go.Scatter(x=spc_view["timestamp"], y=values, mode="lines+markers", name="Ölçüm", line=dict(color=GREEN, width=2), marker=dict(color=[RED if flag else GREEN for flag in outside], size=7)))
+            for limit, label, colour, dash in [(center, "CL", GREEN, "dash"), (ucl, "UCL", RED, "dot"), (lcl, "LCL", RED, "dot"), (spec_high, "USL", AMBER, "dashdot"), (spec_low, "LSL", AMBER, "dashdot")]:
+                if limit is not None:
+                    control.add_hline(y=limit, line_color=colour, line_dash=dash, annotation_text=f"{label} {limit:.3f}")
+            _chart(control, "spc_control_chart", 390)
+            st.dataframe(spc_view[["timestamp", "machine_code", "product", "measurement_name", "measurement_value", "unit", "spec_low", "spec_high"]].sort_values("timestamp", ascending=False), hide_index=True, use_container_width=True, height=220)
+
+    with pareto_tab:
+        st.markdown("#### Hata Türleri Pareto Analizi")
         if reason_totals.empty:
-            st.success("Seçili filtrede hata kaydı yok.")
+            st.info("Pareto analizi için hata kaydı yok.")
         else:
-            donut = go.Figure(go.Pie(labels=reason_totals.index, values=reason_totals.values, hole=.67, textinfo="none", marker_colors=["#ee565c", "#f1a72d", "#349bc7", "#8b6ad3", "#54b889"]))
-            donut.add_annotation(x=.5, y=.5, text=f"<b>{int(reason_totals.sum())}</b><br>Toplam hata", showarrow=False)
-            show_chart(donut, "quality_reason_donut_v4")
-    with top_row[1], st.container(border=True):
-        title("Makine Bazlı Kalite Oranı")
-        if machine_summary.empty:
-            st.caption("Makine kalite verisi yok.")
-        else:
-            comparison = go.Figure()
-            comparison.add_trace(go.Bar(x=machine_summary["machine_code"], y=machine_summary["Kalite"], name="Kalite Oranı", marker_color="#149a63", text=machine_summary["Kalite"].map(lambda value: f"%{value:.1f}"), textposition="outside"))
-            comparison.add_trace(go.Bar(x=machine_summary["machine_code"], y=machine_summary["Hata"], name="Hata Oranı", marker_color="#e56065", text=machine_summary["Hata"].map(lambda value: f"%{value:.1f}"), textposition="outside"))
-            comparison.update_layout(barmode="group", yaxis=dict(range=[0, 108], ticksuffix="%"))
-            show_chart(comparison, "quality_machine_comparison_v4")
-    with top_row[2], st.container(border=True):
-        title("Kalite Oranı Trendi")
-        daily = data.dropna(subset=["_time"]).groupby(data["_time"].dt.date, as_index=False).agg(Üretim=("produced", "sum"), Hatalı=("defective", "sum"))
-        if daily.empty:
-            st.caption("Tarih bazlı kalite kaydı yok.")
-        else:
-            daily["Kalite"] = ((daily["Üretim"] - daily["Hatalı"]) / daily["Üretim"].replace(0, 1) * 100).clip(0, 100)
-            daily["Hata"] = (daily["Hatalı"] / daily["Üretim"].replace(0, 1) * 100).clip(0, 100)
-            trend = go.Figure()
-            trend.add_trace(go.Scatter(x=daily["_time"], y=daily["Kalite"], name="Kalite Oranı", mode="lines+markers", line=dict(color="#159a63", width=3)))
-            trend.add_trace(go.Scatter(x=daily["_time"], y=daily["Hata"], name="Hata Oranı", mode="lines+markers", line=dict(color="#e56065", width=2)))
-            trend.update_layout(yaxis=dict(ticksuffix="%"))
-            show_chart(trend, "quality_daily_trend_v4")
-
-    middle_row = st.columns([1.05, 1.1, 1], gap="small")
-    with middle_row[0], st.container(border=True):
-        title("Ürün Bazlı Kalite Analizi")
-        product_summary = data.groupby("product", as_index=False).agg(**{"Toplam Üretim": ("produced", "sum"), "Hatalı": ("defective", "sum")})
-        product_summary["Sağlam"] = (product_summary["Toplam Üretim"] - product_summary["Hatalı"]).clip(lower=0)
-        product_summary["Kalite Oranı"] = (product_summary["Sağlam"] / product_summary["Toplam Üretim"].replace(0, 1) * 100).clip(0, 100).map(lambda value: f"%{value:.1f}")
-        st.dataframe(product_summary[["product", "Toplam Üretim", "Sağlam", "Hatalı", "Kalite Oranı"]].rename(columns={"product": "Ürün"}), hide_index=True, use_container_width=True, height=215)
-    with middle_row[1], st.container(border=True):
-        title("Son Kalite Kayıtları")
-        recent = data.head(8)[["timestamp", "machine_code", "product", "defect_reason", "defective"]].rename(columns={"timestamp":"Tarih", "machine_code":"Makine", "product":"Ürün", "defect_reason":"Hata Türü", "defective":"Adet"})
-        st.dataframe(recent, hide_index=True, use_container_width=True, height=215)
-    with middle_row[2], st.container(border=True):
-        title("Kalite Uyarıları")
-        warning_machines = machine_summary[(machine_summary["Kalite"] < 95) | (machine_summary["Hatalı"] > 0)].sort_values("Kalite")
-        if warning_machines.empty:
-            st.success("Seçili filtrede kalite uyarısı yok.")
-        else:
-            for _, warning in warning_machines.head(6).iterrows():
-                alert_colour = "#e35d64" if warning["Kalite"] < 90 else "#e9a338"
-                st.markdown(f'<div class="ql-alert" style="--ql-alert:{alert_colour}"><b>{warning["machine_code"]}</b> · Kalite %{warning["Kalite"]:.1f}<br>{int(warning["Hatalı"])} hatalı parça</div>', unsafe_allow_html=True)
-
-    bottom_row = st.columns([1.15, 1, 1, .9], gap="small")
-    with bottom_row[0], st.container(border=True):
-        title("Hata Dağılımı · Pareto")
-        if reason_totals.empty:
-            st.caption("Pareto analizi için hata kaydı yok.")
-        else:
-            pareto = go.Figure(go.Bar(x=reason_totals.index, y=reason_totals.values, marker_color="#159a63", name="Hatalı adet"))
-            pareto.add_trace(go.Scatter(x=reason_totals.index, y=reason_totals.cumsum() / max(reason_totals.sum(), 1) * 100, yaxis="y2", mode="lines+markers", name="Kümülatif %", line=dict(color="#285f6e")))
+            pareto_frame = reason_totals.rename("Hatalı Adet").reset_index().rename(columns={"defect_reason": "Hata Türü"})
+            pareto_frame["Kümülatif %"] = pareto_frame["Hatalı Adet"].cumsum() / max(pareto_frame["Hatalı Adet"].sum(), 1) * 100
+            pareto = go.Figure(go.Bar(x=pareto_frame["Hata Türü"], y=pareto_frame["Hatalı Adet"], marker_color=GREEN, name="Hatalı adet", text=pareto_frame["Hatalı Adet"]))
+            pareto.add_trace(go.Scatter(x=pareto_frame["Hata Türü"], y=pareto_frame["Kümülatif %"], yaxis="y2", mode="lines+markers", name="Kümülatif %", line=dict(color=RED, width=3)))
             pareto.update_layout(yaxis2=dict(overlaying="y", side="right", range=[0, 110], ticksuffix="%"))
-            show_chart(pareto, "quality_pareto_v4")
-    with bottom_row[1], st.container(border=True):
-        title("Kalite Oranı Dağılımı")
-        quality_donut = go.Figure(go.Pie(labels=["Sağlam", "Hatalı"], values=[total_good, total_defective], hole=.7, textinfo="none", marker_colors=["#159a63", "#e56065"]))
-        quality_donut.add_annotation(x=.5, y=.5, text=f"<b>%{quality_rate:.1f}</b><br>Toplam kalite", showarrow=False)
-        show_chart(quality_donut, "quality_total_donut_v4")
-    with bottom_row[2], st.container(border=True):
-        title("En Fazla Hata Olan Makineler")
-        ranking = machine_summary.sort_values("Hatalı", ascending=False).head(5)
-        if ranking.empty:
-            st.caption("Makine hata kaydı yok.")
-        else:
-            ranking_chart = go.Figure(go.Bar(y=ranking["machine_code"], x=ranking["Hatalı"], orientation="h", marker_color="#eda733", text=ranking["Hatalı"], textposition="outside"))
-            show_chart(ranking_chart, "quality_machine_ranking_v4")
-    with bottom_row[3], st.container(border=True):
-        title("Hızlı İşlemler")
-        if st.button("＋ Yeni Kalite Kaydı", type="primary", use_container_width=True, key="quality_quick_new_v4"):
-            st.session_state["quality_new_open"] = True
-        report_view = data[["timestamp", "machine_code", "product", "produced", "defective", "defect_reason", "shift"]].copy()
-        st.download_button("Hata Raporu · CSV", report_view.to_csv(index=False).encode("utf-8-sig"), "kalite_raporu.csv", mime="text/csv", use_container_width=True)
-        excel_output = io.BytesIO()
-        with pd.ExcelWriter(excel_output, engine="openpyxl") as writer:
-            report_view.to_excel(writer, sheet_name="Kalite Kayıtları", index=False)
-            product_summary.to_excel(writer, sheet_name="Ürün Analizi", index=False)
-        st.download_button("Excel'e Aktar", excel_output.getvalue(), "kalite_raporu.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+            _chart(pareto, "quality_pareto_spc", 390)
+            display_pareto = pareto_frame.copy()
+            display_pareto["Kümülatif %"] = display_pareto["Kümülatif %"].map(lambda x: f"%{x:.1f}")
+            st.dataframe(display_pareto, hide_index=True, use_container_width=True)
+
+    with st.expander("Rapor ve dışa aktarma"):
+        report = data[["timestamp", "machine_code", "product", "produced", "defective", "defect_reason", "shift"]]
+        report_columns = st.columns(2)
+        report_columns[0].download_button("Kalite CSV", report.to_csv(index=False).encode("utf-8-sig"), "kalite_raporu.csv", "text/csv", use_container_width=True)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            report.to_excel(writer, sheet_name="Kalite", index=False)
+            machine_summary.to_excel(writer, sheet_name="Makine Özeti", index=False)
+        report_columns[1].download_button("Kalite Excel", output.getvalue(), "kalite_raporu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
