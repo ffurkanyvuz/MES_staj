@@ -356,6 +356,47 @@ def ensure_spc_schema(database_identity, schema_version="spc-v1"):
     return True
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_maturity_schema(database_identity, schema_version="digital-maturity-v1"):
+    """Olgunluk değerlendirmesi, kategori ayrıntısı ve aksiyon geçmişini kurar."""
+    connection = conn()
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS digital_maturity_scores(
+            id INTEGER PRIMARY KEY,
+            assessment_date TEXT NOT NULL,
+            overall_score REAL NOT NULL,
+            maturity_level TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS digital_maturity_categories(
+            id INTEGER PRIMARY KEY,
+            assessment_id INTEGER NOT NULL,
+            category_name TEXT NOT NULL,
+            score REAL NOT NULL,
+            weight REAL NOT NULL,
+            details TEXT
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS digital_maturity_actions(
+            id INTEGER PRIMARY KEY,
+            category_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expected_score_gain REAL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_maturity_score_date ON digital_maturity_scores(assessment_date)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_maturity_category_assessment ON digital_maturity_categories(assessment_id)")
+    connection.commit()
+    connection.close()
+    return True
+
+
 def get_sensor_thresholds():
     values = DEFAULT_SENSOR_THRESHOLDS.copy()
     try:
@@ -1065,9 +1106,9 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
-    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
-    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk"},
+    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk"},
+    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk"},
 }
 
 NAV_LABELS = {
@@ -1078,7 +1119,7 @@ NAV_LABELS = {
     "📦 Stok": "Stok", "🔎 Detay": "Makine Detayı", "📄 Raporlar": "Raporlar",
     "📺 Andon Ekranı": "Andon Panosu", "🔳 QR Makine": "QR Makine", "📜 Denetim Kaydı": "Denetim ve Yedekleme",
     "👥 Kullanıcı Yönetimi": "Kullanıcı ve Yetki", "📊 Veritabanı": "Veri ve Raporlama",
-    "🧠 Akıllı Analiz": "Akıllı Analiz", "👥 OLE": "İşgücü OLE",
+    "🧠 Akıllı Analiz": "Akıllı Analiz", "👥 OLE": "İşgücü OLE", "🌐 Dijital Olgunluk": "Dijital Olgunluk",
 }
 
 
@@ -1640,6 +1681,7 @@ notification_database_identity = (
 )
 ensure_notification_schema(notification_database_identity)
 ensure_spc_schema(notification_database_identity)
+ensure_maturity_schema(notification_database_identity)
 
 
 # =========================================================
@@ -2673,6 +2715,7 @@ module_page_info = {
     "👥 Kullanıcı Yönetimi": ("Kullanıcı Yönetimi", "Admin için rol ve kullanıcı durumu düzenleme"),
     "🧠 Akıllı Analiz": ("Akıllı Analiz", "Üretim, OEE ve bakım riskleri için karar desteği"),
     "👥 OLE": ("İşgücü OLE", "Operatör ve vardiya bazında tahmini işgücü etkinliği"),
+    "🌐 Dijital Olgunluk": ("Dijital Fabrika Olgunluğu", "Dokuz kategoride açıklanabilir dijital dönüşüm skoru"),
 }
 active_module = st.session_state.get("selected_module", "🏠 Ana Sayfa")
 if not can_access_module(active_module):
@@ -3056,7 +3099,7 @@ with st.sidebar:
         "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE"],
         "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
         "KALİTE VE BAKIM": ["✅ Kalite", "🔧 Bakım", "📦 Stok"],
-        "YÖNETİM": ["🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
+        "YÖNETİM": ["🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
     }
     if "selected_module" not in st.session_state:
         st.session_state["selected_module"] = "🏠 Ana Sayfa"
@@ -3412,6 +3455,16 @@ if selected_module == "🏠 Ana Sayfa":
             for column, (icon, label, value, note) in zip(top_kpis_v3, kpi_row_v3):
                 with column:
                     st.markdown(f"<div class='mesv3-kpi'><span class='mesv3-kpi-icon'>{icon}</span><div><div class='mesv3-kpi-title'>{label}</div><span class='mesv3-kpi-value'>{value}</span><span class='mesv3-kpi-note'>▲ {note}</span></div></div>", unsafe_allow_html=True)
+
+        from maturity_panel import calculate_maturity
+        maturity_home_v3 = calculate_maturity(q, using_postgres=USING_POSTGRES, api_configured=bool(API_URL))
+        maturity_history_v3 = q("SELECT overall_score FROM digital_maturity_scores ORDER BY assessment_date DESC,id DESC LIMIT 1")
+        maturity_previous_v3 = float(maturity_history_v3.iloc[0]["overall_score"]) if not maturity_history_v3.empty else maturity_home_v3["overall"]
+        maturity_change_v3 = maturity_home_v3["overall"] - maturity_previous_v3
+        st.markdown(f'''<div style="margin:7px 0 9px;border:1px solid #cfe8d9;border-left:5px solid {maturity_home_v3["colour"]};border-radius:9px;background:linear-gradient(120deg,#fff,#effaf4);padding:10px 14px;display:grid;grid-template-columns:190px 1fr 170px;gap:15px;align-items:center"><div><small style="font-size:.58rem;color:#668376;font-weight:800">DİJİTAL FABRİKA OLGUNLUĞU</small><div style="font-size:1.45rem;font-weight:950;color:#0b5238">{maturity_home_v3["overall"]:.1f} / 100</div></div><div><b style="font-size:.75rem;color:#174b36">Seviye {maturity_home_v3["level_number"]} · {maturity_home_v3["level_name"]}</b><div style="height:7px;background:#dceee3;border-radius:9px;margin-top:6px;overflow:hidden"><i style="display:block;height:100%;width:{maturity_home_v3["overall"]}%;background:{maturity_home_v3["colour"]}"></i></div></div><div style="font-size:.63rem;color:#618071">Son değerlendirme<br><b>{date.today():%d.%m.%Y}</b><br>Değişim {maturity_change_v3:+.1f}</div></div>''', unsafe_allow_html=True)
+        if st.button("Dijital olgunluk detaylarını aç", key="home_open_maturity", use_container_width=True):
+            st.session_state["selected_module"] = "🌐 Dijital Olgunluk"
+            st.rerun()
 
         machine_area_v3, trend_area_v3 = st.columns([1.36, 1], gap="small")
         with machine_area_v3:
@@ -5435,8 +5488,12 @@ if selected_module == "👷 Vardiya":
 
 
 if selected_module == "✅ Kalite":
-    from quality_panel import render_quality_panel
-    render_quality_panel(q, execute, df, has_role)
+    # Streamlit Cloud dosyaları ardışık commitlerde güncellerken eski importu
+    # bellekte tutabilir. Modülü burada yenilemek imza uyuşmazlığını önler.
+    import importlib
+    import quality_panel
+    quality_panel = importlib.reload(quality_panel)
+    quality_panel.render_quality_panel(q, execute, df, has_role)
     if st.session_state.pop("quality_record_created", False):
         st.success("Kalite kaydı oluşturuldu ve analizlere eklendi.")
 
@@ -5470,6 +5527,14 @@ if selected_module == "✅ Kalite":
 
     if st.session_state.get("quality_new_open", False):
         quality_record_dialog()
+
+
+if selected_module == "🌐 Dijital Olgunluk":
+    import importlib
+    import maturity_panel
+    maturity_panel = importlib.reload(maturity_panel)
+    maturity_panel.render_maturity_panel(q, execute, using_postgres=USING_POSTGRES, api_configured=bool(API_URL))
+    st.stop()
 
 
 if selected_module == "🔧 Bakım":
@@ -6214,7 +6279,7 @@ if selected_module == "👥 Kullanıcı Yönetimi":
         role_options = ["admin", "operator", "maintenance", "quality"]
         role_names = {"admin":"ADMIN", "operator":"OPERATÖR", "maintenance":"BAKIM", "quality":"KALİTE"}
         permission_modules = [
-            "🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE",
+            "🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "🌐 Dijital Olgunluk",
             "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya",
             "🧰 Bakım Talebi", "✅ Kalite", "🔧 Bakım", "📦 Stok", "🔎 Detay",
             "📺 Andon Ekranı", "🔳 QR Makine"
