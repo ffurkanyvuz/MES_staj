@@ -316,6 +316,46 @@ def ensure_notification_schema(database_identity, schema_version="notifications-
     return True
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_spc_schema(database_identity, schema_version="spc-v1"):
+    """SPC ölçüm tablosunu her iki veritabanında kurar ve ilk demoyu hazırlar."""
+    connection = conn()
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS spc_measurements(
+            id INTEGER PRIMARY KEY,
+            machine_id INTEGER,
+            machine_code TEXT NOT NULL,
+            product TEXT NOT NULL,
+            measurement_name TEXT NOT NULL,
+            measurement_value REAL NOT NULL,
+            unit TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            spec_low REAL,
+            spec_high REAL
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_spc_machine_time ON spc_measurements(machine_code,timestamp)")
+    existing = connection.execute("SELECT COUNT(*) AS total FROM spc_measurements").fetchone()
+    existing_total = int(existing["total"] if hasattr(existing, "keys") else existing[0])
+    if existing_total == 0:
+        machines = connection.execute("SELECT id,machine_code,product FROM machines ORDER BY machine_code").fetchall()
+        for machine_index, machine in enumerate(machines):
+            for sample_index in range(24):
+                drift = max(sample_index - 17, 0) * .012 if machine_index == 1 else 0
+                value = round(25 + random_float(-.035, .035) + drift, 3)
+                measured_at = (datetime.now() - timedelta(minutes=(23 - sample_index) * 20)).strftime("%Y-%m-%d %H:%M:%S")
+                connection.execute("""
+                    INSERT INTO spc_measurements(
+                        id,machine_id,machine_code,product,measurement_name,
+                        measurement_value,unit,timestamp,spec_low,spec_high
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """, (int(uuid.uuid4().int % 2_000_000_000) or 1, machine["id"], machine["machine_code"],
+                      machine["product"] or "Tanımsız Ürün", "Çap", value, "mm", measured_at, 24.90, 25.10))
+    connection.commit()
+    connection.close()
+    return True
+
+
 def get_sensor_thresholds():
     values = DEFAULT_SENSOR_THRESHOLDS.copy()
     try:
@@ -1361,7 +1401,7 @@ def local_simulate():
     timestamp = now()
     today = date.today()
     thresholds = get_sensor_thresholds()
-    summary = {"production": 0, "alarms": 0, "status_changes": 0, "queued_dispatches": 0}
+    summary = {"production": 0, "alarms": 0, "status_changes": 0, "queued_dispatches": 0, "spc_measurements": 0}
 
     for r in c.execute("SELECT * FROM machines ORDER BY machine_code").fetchall():
         previous_production = int(r["production"])
@@ -1474,6 +1514,35 @@ def local_simulate():
                 VALUES(?,?,?,?,?,?,?)
             """, (r["id"], r["machine_code"], r["product"], production, 1, "Simülasyon kalite kontrolü", timestamp))
 
+        if production > previous_production and new_status == "Çalışıyor":
+            recent_spc = c.execute("""
+                SELECT measurement_value FROM spc_measurements
+                WHERE machine_code=? AND measurement_name='Çap'
+                ORDER BY timestamp DESC LIMIT 20
+            """, (r["machine_code"],)).fetchall()
+            recent_values = [float(item["measurement_value"]) for item in reversed(recent_spc)]
+            process_drift = .018 if r["machine_code"] == "CNC-02" and random_float() < .35 else 0
+            spc_value = round(25 + random_float(-.035, .035) + process_drift, 3)
+            c.execute("""
+                INSERT INTO spc_measurements(
+                    id,machine_id,machine_code,product,measurement_name,
+                    measurement_value,unit,timestamp,spec_low,spec_high
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """, (int(uuid.uuid4().int % 2_000_000_000) or 1, r["id"], r["machine_code"],
+                  r["product"] or "Tanımsız Ürün", "Çap", spc_value, "mm", timestamp, 24.90, 25.10))
+            summary["spc_measurements"] += 1
+            if len(recent_values) >= 5:
+                series = pd.Series(recent_values, dtype=float)
+                center = float(series.mean())
+                deviation = float(series.std(ddof=1))
+                outside_control = deviation > 0 and (spc_value > center + 3 * deviation or spc_value < center - 3 * deviation)
+                outside_spec = spc_value > 25.10 or spc_value < 24.90
+                if outside_control or outside_spec:
+                    alarm_text = f"SPC: Çap ölçümü kontrol limitini aştı ({spc_value:.3f} mm)"
+                    recent_alarm = c.execute("SELECT 1 FROM alarms WHERE machine_id=? AND alarm LIKE 'SPC:%' AND acknowledged=0 LIMIT 1", (r["id"],)).fetchone()
+                    if not recent_alarm:
+                        alarm_list.append((alarm_text, "Kritik" if outside_spec else "Uyarı"))
+
         if new_status != status:
             summary["status_changes"] += 1
             if new_status in ("Beklemede", "Arızalı"):
@@ -1570,6 +1639,7 @@ notification_database_identity = (
     hashlib.sha256(DATABASE_URL.encode()).hexdigest() if USING_POSTGRES else os.path.abspath(DB)
 )
 ensure_notification_schema(notification_database_identity)
+ensure_spc_schema(notification_database_identity)
 
 
 # =========================================================
@@ -5366,7 +5436,7 @@ if selected_module == "👷 Vardiya":
 
 if selected_module == "✅ Kalite":
     from quality_panel import render_quality_panel
-    render_quality_panel(q)
+    render_quality_panel(q, execute, df, has_role)
     if st.session_state.pop("quality_record_created", False):
         st.success("Kalite kaydı oluşturuldu ve analizlere eklendi.")
 
@@ -6466,3 +6536,4 @@ st.markdown("""
     Daha akıllı üretim • Daha verimli süreçler • Daha güçlü gelecek
 </div>
 """, unsafe_allow_html=True)
+
