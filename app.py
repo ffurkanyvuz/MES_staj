@@ -2750,12 +2750,19 @@ if pd.notna(latest_data_at):
 else:
     freshness_text, freshness_state = "Veri bekleniyor", "stale"
 
-critical_focus_counts = {
-    "alarms": int(q("SELECT COUNT(*) AS n FROM alarms WHERE acknowledged=0 AND level='Kritik'").iloc[0]["n"]),
-    "machines": int(q("SELECT COUNT(*) AS n FROM machines WHERE status='Arızalı'").iloc[0]["n"]),
-    "orders": int(q("SELECT COUNT(*) AS n FROM work_orders WHERE status='Gecikmiş' OR (status!='Tamamlandı' AND due_date<?)", (str(date.today()),)).iloc[0]["n"]),
-    "maintenance": int(q("SELECT COUNT(*) AS n FROM maintenance WHERE status!='Tamamlandı' AND next_date<?", (str(date.today()),)).iloc[0]["n"]),
-}
+critical_focus_counts = {"alarms": 0, "machines": 0, "orders": 0, "maintenance": 0}
+if st.session_state.get("critical_focus_enabled", False):
+    # Kritik odak kapalıyken bu pahalı sayaçlara hiç ihtiyaç yok. Açıkken de dört
+    # ayrı Neon gidiş-dönüşü yerine bütün değerleri tek sorguda alıyoruz.
+    critical_rows = q("""
+        SELECT
+            (SELECT COUNT(*) FROM alarms WHERE acknowledged=0 AND level='Kritik') AS alarms,
+            (SELECT COUNT(*) FROM machines WHERE status='Arızalı') AS machines,
+            (SELECT COUNT(*) FROM work_orders WHERE status='Gecikmiş' OR (status!='Tamamlandı' AND due_date<?)) AS orders,
+            (SELECT COUNT(*) FROM maintenance WHERE status!='Tamamlandı' AND next_date<?) AS maintenance
+    """, (str(date.today()), str(date.today())))
+    if not critical_rows.empty:
+        critical_focus_counts = {name: int(critical_rows.iloc[0][name] or 0) for name in critical_focus_counts}
 
 st.markdown(f"""
 <style>
@@ -2770,7 +2777,17 @@ st.markdown(f"""
 @st.fragment(run_every="20s")
 def notification_refresh_tick():
     """Yeni görev geldiğinde üst çubuğu kullanıcı müdahalesi olmadan yeniler."""
-    sync_current_user_notifications()
+    # Bildirim tablosunu her Streamlit rerun'ında baştan taramak özellikle uzak
+    # Neon bağlantısında sayfa geçişlerini yavaşlatıyordu. İlk çizimde mevcut
+    # bildirimler doğrudan okunur; kaynak senkronizasyonu en fazla 5 dakikada bir yapılır.
+    sync_key = f"notification_sync_at::{st.session_state.get('username', '')}"
+    now_tick = time.time()
+    last_sync = st.session_state.get(sync_key)
+    if last_sync is None:
+        st.session_state[sync_key] = now_tick
+    elif now_tick - float(last_sync) >= 300:
+        sync_current_user_notifications()
+        st.session_state[sync_key] = now_tick
     latest_notifications = current_user_notifications()
     latest_unread = int((latest_notifications["is_read"] == 0).sum()) if not latest_notifications.empty else 0
     previous_unread = st.session_state.get("notification_unread_snapshot")
@@ -3362,20 +3379,23 @@ average_quality = df["quality"].mean() * 100
 total_production = int(df["production"].sum())
 total_target = int(df["target"].sum())
 
-labor_metrics = labor_effectiveness_metrics(df)
-if labor_metrics.empty:
-    overall_labor_availability = overall_labor_performance = overall_labor_quality = overall_ole = 0.0
-    total_labor_loss = 0.0
-else:
-    labor_weights = labor_metrics["Planlı Süre"].clip(lower=0)
-    labor_weight_total = max(float(labor_weights.sum()), 1.0)
-    overall_labor_availability = float((labor_metrics["Kullanılabilirlik"] * labor_weights).sum() / labor_weight_total)
-    overall_labor_performance = float((labor_metrics["Performans"] * labor_weights).sum() / labor_weight_total)
-    total_good_labor_output = float(labor_metrics["Sağlam Üretim"].sum())
-    total_labor_output = float(labor_metrics["Üretim"].sum())
-    overall_labor_quality = total_good_labor_output / max(total_labor_output, 1) * 100
-    overall_ole = overall_labor_availability * overall_labor_performance * overall_labor_quality / 10000
-    total_labor_loss = float(labor_metrics["İşgücü Kaybı"].sum())
+labor_metrics = pd.DataFrame()
+overall_labor_availability = overall_labor_performance = overall_labor_quality = overall_ole = 0.0
+total_labor_loss = 0.0
+# İşgücü hesabı ayrıca duruş/atama sorguları çalıştırır. Sonuca yalnızca ana sayfa
+# ve OLE modülü ihtiyaç duyduğu için diğer bütün sayfalarda bu maliyeti kaldırıyoruz.
+if selected_module in ("🏠 Ana Sayfa", "👥 OLE"):
+    labor_metrics = labor_effectiveness_metrics(df)
+    if not labor_metrics.empty:
+        labor_weights = labor_metrics["Planlı Süre"].clip(lower=0)
+        labor_weight_total = max(float(labor_weights.sum()), 1.0)
+        overall_labor_availability = float((labor_metrics["Kullanılabilirlik"] * labor_weights).sum() / labor_weight_total)
+        overall_labor_performance = float((labor_metrics["Performans"] * labor_weights).sum() / labor_weight_total)
+        total_good_labor_output = float(labor_metrics["Sağlam Üretim"].sum())
+        total_labor_output = float(labor_metrics["Üretim"].sum())
+        overall_labor_quality = total_good_labor_output / max(total_labor_output, 1) * 100
+        overall_ole = overall_labor_availability * overall_labor_performance * overall_labor_quality / 10000
+        total_labor_loss = float(labor_metrics["İşgücü Kaybı"].sum())
 
 
 production_gap = total_production - total_target
@@ -3456,12 +3476,21 @@ if selected_module == "🏠 Ana Sayfa":
                 with column:
                     st.markdown(f"<div class='mesv3-kpi'><span class='mesv3-kpi-icon'>{icon}</span><div><div class='mesv3-kpi-title'>{label}</div><span class='mesv3-kpi-value'>{value}</span><span class='mesv3-kpi-note'>▲ {note}</span></div></div>", unsafe_allow_html=True)
 
-        from maturity_panel import calculate_maturity
-        maturity_home_v3 = calculate_maturity(q, using_postgres=USING_POSTGRES, api_configured=bool(API_URL))
-        maturity_history_v3 = q("SELECT overall_score FROM digital_maturity_scores ORDER BY assessment_date DESC,id DESC LIMIT 1")
-        maturity_previous_v3 = float(maturity_history_v3.iloc[0]["overall_score"]) if not maturity_history_v3.empty else maturity_home_v3["overall"]
-        maturity_change_v3 = maturity_home_v3["overall"] - maturity_previous_v3
-        st.markdown(f'''<div style="margin:7px 0 9px;border:1px solid #cfe8d9;border-left:5px solid {maturity_home_v3["colour"]};border-radius:9px;background:linear-gradient(120deg,#fff,#effaf4);padding:10px 14px;display:grid;grid-template-columns:190px 1fr 170px;gap:15px;align-items:center"><div><small style="font-size:.58rem;color:#668376;font-weight:800">DİJİTAL FABRİKA OLGUNLUĞU</small><div style="font-size:1.45rem;font-weight:950;color:#0b5238">{maturity_home_v3["overall"]:.1f} / 100</div></div><div><b style="font-size:.75rem;color:#174b36">Seviye {maturity_home_v3["level_number"]} · {maturity_home_v3["level_name"]}</b><div style="height:7px;background:#dceee3;border-radius:9px;margin-top:6px;overflow:hidden"><i style="display:block;height:100%;width:{maturity_home_v3["overall"]}%;background:{maturity_home_v3["colour"]}"></i></div></div><div style="font-size:.63rem;color:#618071">Son değerlendirme<br><b>{date.today():%d.%m.%Y}</b><br>Değişim {maturity_change_v3:+.1f}</div></div>''', unsafe_allow_html=True)
+        # Ana sayfada olgunluğu yeniden hesaplamak yaklaşık 30 sorgu üretiyordu.
+        # Burada son iki kayıt yeterli; ayrıntılı hesap yalnızca kendi modülünde yapılır.
+        from maturity_panel import maturity_level
+        maturity_history_v3 = q("SELECT assessment_date,overall_score FROM digital_maturity_scores ORDER BY assessment_date DESC,id DESC LIMIT 2")
+        if maturity_history_v3.empty:
+            maturity_score_v3, maturity_previous_v3 = 0.0, 0.0
+            maturity_date_v3 = "Değerlendirme bekliyor"
+        else:
+            maturity_score_v3 = float(maturity_history_v3.iloc[0]["overall_score"] or 0)
+            maturity_previous_v3 = float(maturity_history_v3.iloc[1]["overall_score"] or 0) if len(maturity_history_v3) > 1 else maturity_score_v3
+            maturity_date_value_v3 = pd.to_datetime(maturity_history_v3.iloc[0]["assessment_date"], errors="coerce")
+            maturity_date_v3 = maturity_date_value_v3.strftime("%d.%m.%Y") if pd.notna(maturity_date_value_v3) else "Kayıtlı değerlendirme"
+        maturity_level_no_v3, maturity_level_name_v3, maturity_colour_v3 = maturity_level(maturity_score_v3)
+        maturity_change_v3 = maturity_score_v3 - maturity_previous_v3
+        st.markdown(f'''<div style="margin:7px 0 9px;border:1px solid #cfe8d9;border-left:5px solid {maturity_colour_v3};border-radius:9px;background:linear-gradient(120deg,#fff,#effaf4);padding:10px 14px;display:grid;grid-template-columns:190px 1fr 170px;gap:15px;align-items:center"><div><small style="font-size:.58rem;color:#668376;font-weight:800">DİJİTAL FABRİKA OLGUNLUĞU</small><div style="font-size:1.45rem;font-weight:950;color:#0b5238">{maturity_score_v3:.1f} / 100</div></div><div><b style="font-size:.75rem;color:#174b36">Seviye {maturity_level_no_v3} · {maturity_level_name_v3}</b><div style="height:7px;background:#dceee3;border-radius:9px;margin-top:6px;overflow:hidden"><i style="display:block;height:100%;width:{maturity_score_v3}%;background:{maturity_colour_v3}"></i></div></div><div style="font-size:.63rem;color:#618071">Son değerlendirme<br><b>{maturity_date_v3}</b><br>Değişim {maturity_change_v3:+.1f}</div></div>''', unsafe_allow_html=True)
         if st.button("Dijital olgunluk detaylarını aç", key="home_open_maturity", use_container_width=True):
             st.session_state["selected_module"] = "🌐 Dijital Olgunluk"
             st.rerun()
