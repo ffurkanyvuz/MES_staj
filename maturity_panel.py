@@ -130,6 +130,7 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
     planned_maintenance = count_value("planned_maintenance")
     five_why_analyses = count_value("five_why_analyses")
     completed_five_why = count_value("completed_five_why")
+    five_why_score = 100 if completed_five_why else (75 if five_why_analyses else 0)
 
     categories = {
         "Üretim Dijitalleşmesi": [
@@ -196,7 +197,7 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
         "Sürekli İyileştirme": [
             _signal("Aksiyon takibi", 100 if alarm_actions else 0, "Alarm ve iyileştirme aksiyonlarını takip et", f"{alarm_actions} aksiyon"),
             _signal("Kök neden verisi", 100 if downtime and quality_reasons else (50 if downtime else 0), "Duruş ve kalite kök nedenlerini standartlaştır", "Duruş + kalite" if quality_reasons else "Kısmi"),
-            _signal("5 Why analizi", 100 if completed_five_why else (75 if five_why_analyses else 0), "5 Why kök neden analizi oluştur ve aksiyonu doğrulayarak kapat", f"{five_why_analyses} analiz · {completed_five_why} tamamlandı" if five_why_analyses else "Henüz yok"),
+            _signal("5 Why analizi", five_why_score, "5 Why kök neden analizi oluştur ve aksiyonu doğrulayarak kapat", f"{five_why_analyses} analiz · {completed_five_why} tamamlandı" if five_why_analyses else "Henüz yok"),
             _signal("Önce / sonra karşılaştırması", 0, "Kaizen önce/sonra KPI kaydı ekle", "Yok"),
             _signal("Sonuç ölçümü", 50 if audit else 0, "İyileştirme kazançlarını sayısallaştır", f"{audit} denetim kaydı"),
             _signal("Yönetim önerileri", 100 if machines else 0, "Önerileri aksiyon planına dönüştür", "Akıllı Analiz"),
@@ -220,7 +221,8 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
                 missing.append({"Kategori": name, "Eksik Alan": item["label"], "Önerilen Aksiyon": item["action"], "Mevcut": item["source"], "Puan": item["score"], "Beklenen Kazanç": round((100 - item["score"]) / len(signals) * WEIGHTS[name], 1)})
     overall = round(sum(row["Skor"] * row["Ağırlık"] for row in category_rows), 1)
     level_number, level_name, colour = maturity_level(overall)
-    return {"overall": overall, "level_number": level_number, "level_name": level_name, "colour": colour, "categories": category_rows, "missing": sorted(missing, key=lambda item: (-item["Beklenen Kazanç"], item["Puan"]))}
+    five_why_gain = round(five_why_score / 6 * WEIGHTS["Sürekli İyileştirme"], 1)
+    return {"overall": overall, "level_number": level_number, "level_name": level_name, "colour": colour, "categories": category_rows, "missing": sorted(missing, key=lambda item: (-item["Beklenen Kazanç"], item["Puan"])), "five_why": {"analyses": five_why_analyses, "completed": completed_five_why, "score": five_why_score, "gain": five_why_gain}}
 
 
 def _save_assessment(query, execute, result, force=False):
@@ -262,7 +264,7 @@ def render_maturity_panel(query, execute, *, using_postgres=False, api_configure
 
     st.markdown("""
     <style>
-    .dm-hero{display:grid;grid-template-columns:180px 1fr 210px;gap:18px;align-items:center;background:linear-gradient(125deg,#073f2d,#0b8653);color:#fff;border-radius:14px;padding:18px 22px;box-shadow:0 8px 25px rgba(4,84,47,.18);margin-bottom:10px}.dm-score{font-size:2.55rem;font-weight:950}.dm-score small{font-size:.9rem}.dm-level{font-size:1.05rem;font-weight:850}.dm-track{height:10px;background:rgba(255,255,255,.22);border-radius:99px;overflow:hidden;margin:9px 0}.dm-track i{display:block;height:100%;background:#68e3a0;border-radius:99px}.dm-meta{font-size:.7rem;color:#d4f5e2}.dm-kpi{min-height:126px;height:100%;box-sizing:border-box;border:1px solid #cfe6d8;border-radius:13px;background:linear-gradient(135deg,#fff,#f3faf6);padding:13px 15px;box-shadow:0 4px 13px rgba(5,78,44,.05)}.dm-kpi-label{font-size:.67rem;color:#547164;font-weight:800}.dm-kpi-value{font-size:clamp(1.05rem,1.75vw,1.62rem);line-height:1.12;font-weight:900;color:#174b37;margin:10px 0 8px;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;word-break:normal}.dm-kpi-note{display:inline-block;font-size:.62rem;color:#08794d;background:#e4f7eb;border-radius:99px;padding:3px 7px;font-weight:750}.dm-card{border:1px solid #d6ebdf;border-radius:10px;background:linear-gradient(140deg,#fff,#f3fbf6);padding:11px 12px;min-height:112px}.dm-card b{font-size:.76rem;color:#174c36}.dm-card strong{display:block;font-size:1.35rem;color:#087847;margin:6px 0}.dm-card small{font-size:.64rem;color:#668274}.dm-action{border-left:4px solid var(--priority);background:#fff;border-radius:8px;padding:9px 11px;margin:6px 0;box-shadow:0 2px 8px rgba(5,80,44,.05)}.dm-action b{font-size:.73rem;color:#174b37}.dm-action span{display:block;font-size:.64rem;color:#6b8276;margin-top:3px}.dm-disclaimer{font-size:.68rem;color:#657f72;background:#f5faf7;border:1px solid #deeee5;border-radius:8px;padding:9px 11px;margin-top:8px}@media(max-width:900px){.dm-hero{grid-template-columns:1fr}.dm-card{min-height:auto}.dm-kpi{min-height:105px}}
+    .dm-hero{display:grid;grid-template-columns:180px 1fr 210px;gap:18px;align-items:center;background:linear-gradient(125deg,#073f2d,#0b8653);color:#fff;border-radius:14px;padding:18px 22px;box-shadow:0 8px 25px rgba(4,84,47,.18);margin-bottom:10px}.dm-score{font-size:2.55rem;font-weight:950}.dm-score small{font-size:.9rem}.dm-level{font-size:1.05rem;font-weight:850}.dm-track{height:10px;background:rgba(255,255,255,.22);border-radius:99px;overflow:hidden;margin:9px 0}.dm-track i{display:block;height:100%;background:#68e3a0;border-radius:99px}.dm-meta{font-size:.7rem;color:#d4f5e2}.dm-kpi{min-height:126px;height:100%;box-sizing:border-box;border:1px solid #cfe6d8;border-radius:13px;background:linear-gradient(135deg,#fff,#f3faf6);padding:13px 15px;box-shadow:0 4px 13px rgba(5,78,44,.05)}.dm-kpi-label{font-size:.67rem;color:#547164;font-weight:800}.dm-kpi-value{font-size:clamp(1.05rem,1.75vw,1.62rem);line-height:1.12;font-weight:900;color:#174b37;margin:10px 0 8px;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;word-break:normal}.dm-kpi-note{display:inline-block;font-size:.62rem;color:#08794d;background:#e4f7eb;border-radius:99px;padding:3px 7px;font-weight:750}.dm-capability{display:grid;grid-template-columns:50px 1fr 165px;gap:13px;align-items:center;border:1px solid #bfe2ce;border-left:5px solid #0b9857;background:linear-gradient(115deg,#effbf4,#fff);border-radius:11px;padding:11px 14px;margin:10px 0}.dm-cap-icon{width:42px;height:42px;border-radius:11px;background:#0b8f53;color:#fff;display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:950}.dm-cap-main b{display:block;color:#104832;font-size:.79rem}.dm-cap-main span{display:block;color:#5e7b6c;font-size:.63rem;margin-top:4px}.dm-cap-score{text-align:right}.dm-cap-score b{display:block;color:#08794d;font-size:1.15rem}.dm-cap-score span{font-size:.59rem;color:#668174}.dm-card{border:1px solid #d6ebdf;border-radius:10px;background:linear-gradient(140deg,#fff,#f3fbf6);padding:11px 12px;min-height:112px}.dm-card b{font-size:.76rem;color:#174c36}.dm-card strong{display:block;font-size:1.35rem;color:#087847;margin:6px 0}.dm-card small{font-size:.64rem;color:#668274}.dm-action{border-left:4px solid var(--priority);background:#fff;border-radius:8px;padding:9px 11px;margin:6px 0;box-shadow:0 2px 8px rgba(5,80,44,.05)}.dm-action b{font-size:.73rem;color:#174b37}.dm-action span{display:block;font-size:.64rem;color:#6b8276;margin-top:3px}.dm-disclaimer{font-size:.68rem;color:#657f72;background:#f5faf7;border:1px solid #deeee5;border-radius:8px;padding:9px 11px;margin-top:8px}@media(max-width:900px){.dm-hero{grid-template-columns:1fr}.dm-card{min-height:auto}.dm-kpi{min-height:105px}.dm-capability{grid-template-columns:44px 1fr}.dm-cap-score{text-align:left;grid-column:2}}
     </style>
     """, unsafe_allow_html=True)
     st.markdown(f'''<div class="dm-hero"><div><div class="dm-score">{result["overall"]:.1f}<small> / 100</small></div><div class="dm-meta">Dijital Fabrika Olgunluğu</div></div><div><div class="dm-level">Seviye {result["level_number"]} · {html.escape(result["level_name"])}</div><div class="dm-track"><i style="width:{result["overall"]}%"></i></div><div class="dm-meta">Son değerlendirme: {date.today():%d.%m.%Y}</div></div><div><div class="dm-meta">Önceki skor</div><b>{previous:.1f}</b><div class="dm-meta">Değişim: {change:+.1f} puan</div></div></div>''', unsafe_allow_html=True)
@@ -276,6 +278,13 @@ def render_maturity_panel(query, execute, *, using_postgres=False, api_configure
     ]
     for column, (label, value, note) in zip(kpis, kpi_values):
         column.markdown(f'<div class="dm-kpi"><div class="dm-kpi-label">{html.escape(label)}</div><div class="dm-kpi-value">{html.escape(value)}</div><span class="dm-kpi-note">{html.escape(note)}</span></div>', unsafe_allow_html=True)
+
+    five_why = result["five_why"]
+    capability_state = "Aktif" if five_why["analyses"] else "Henüz kullanılmadı"
+    st.markdown(f'''<div class="dm-capability"><div class="dm-cap-icon">5W</div><div class="dm-cap-main"><b>5 Why Kök Neden Analizi · {capability_state}</b><span>Sürekli İyileştirme alanı · {five_why["analyses"]} analiz, {five_why["completed"]} tamamlanan ve doğrulanan aksiyon</span></div><div class="dm-cap-score"><b>{five_why["score"]:.0f} / 100</b><span>Toplam olgunluk katkısı +{five_why["gain"]:.1f} puan</span></div></div>''', unsafe_allow_html=True)
+    if st.button("5 Why analizlerini aç", key="maturity_open_five_why", use_container_width=True):
+        st.session_state["selected_module"] = "🧠 Akıllı Analiz"
+        st.rerun()
 
     radar_col, trend_col = st.columns([1.15, 1], gap="small")
     with radar_col, st.container(border=True):
