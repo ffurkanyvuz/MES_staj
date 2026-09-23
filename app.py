@@ -45,7 +45,8 @@ def runtime_setting(name, default=""):
 DATABASE_URL = runtime_setting("DATABASE_URL")
 USING_POSTGRES = bool(DATABASE_URL)
 POSTGRES_CONNECTION_CACHE_VERSION = "autocommit-v2"
-API_URL = "http://127.0.0.1:8000"
+API_URL = runtime_setting("API_URL", "http://127.0.0.1:8000").rstrip("/")
+TREX_API_KEY = runtime_setting("TREX_API_KEY")
 PUBLIC_APP_URL = runtime_setting(
     "PUBLIC_APP_URL",
     "https://mild-testimonials-fighting-prot.trycloudflare.com"
@@ -1395,6 +1396,7 @@ def api_get(path):
     try:
         response = requests.get(
             API_URL + path,
+            headers={"X-API-Key": TREX_API_KEY} if TREX_API_KEY else {},
             timeout=2
         )
         response.raise_for_status()
@@ -1407,6 +1409,7 @@ def api_post(path):
     try:
         response = requests.post(
             API_URL + path,
+            headers={"X-API-Key": TREX_API_KEY} if TREX_API_KEY else {},
             timeout=3
         )
         response.raise_for_status()
@@ -1419,7 +1422,7 @@ def api_post(path):
 def api_is_alive():
     """Sekme geçişlerini bekletmemek için API durumunu kısa süre önbellekte tutar."""
     try:
-        response = requests.get(API_URL + "/", timeout=.35)
+        response = requests.get(API_URL + "/health", timeout=.6)
         return response.ok
     except requests.RequestException:
         return False
