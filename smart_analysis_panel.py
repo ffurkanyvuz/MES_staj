@@ -36,16 +36,17 @@ def _history_rates(history):
     return result
 
 
-def render_smart_analysis(query):
+def render_smart_analysis(query, execute, *, current_user="", can_manage=False, notifier=None):
     machines = query("""SELECT id,machine_code,status,production,target,planned_time,downtime,
         ideal_cycle,defective,product,operator,shift,last_maintenance,next_maintenance
         FROM machines ORDER BY machine_code""")
     history = query("SELECT id,machine_code,quantity,timestamp FROM production_history ORDER BY id DESC LIMIT 3000")
-    stops = query("SELECT machine_code,reason,duration,event_at FROM downtime ORDER BY id DESC LIMIT 1500")
+    stops = query("SELECT id,machine_code,reason,duration,event_at FROM downtime ORDER BY id DESC LIMIT 1500")
     sensors = query("SELECT machine_code,temperature,vibration,pressure,rpm,timestamp FROM sensors ORDER BY machine_code")
-    orders = query("SELECT order_no,machine_code,product,target,produced,priority,status,due_date FROM work_orders WHERE status!='Tamamlandı' ORDER BY id DESC")
-    maintenance = query("SELECT machine_code,maintenance_type,next_date,status FROM maintenance WHERE status!='Tamamlandı' ORDER BY next_date")
-    alarms = query("SELECT machine_code,alarm,level,time FROM alarms WHERE acknowledged=0 ORDER BY id DESC")
+    orders = query("SELECT id,order_no,machine_code,product,target,produced,priority,status,due_date FROM work_orders WHERE status!='Tamamlandı' ORDER BY id DESC")
+    maintenance = query("SELECT id,machine_code,maintenance_type,next_date,status FROM maintenance WHERE status!='Tamamlandı' ORDER BY next_date")
+    alarms = query("SELECT id,machine_code,alarm,level,time FROM alarms WHERE acknowledged=0 ORDER BY id DESC")
+    quality_events = query("SELECT id,machine_code,product,defective,defect_reason,timestamp FROM quality WHERE COALESCE(defective,0)>0 ORDER BY id DESC LIMIT 200")
     stock = query("SELECT product_code,product_name,stock,min_stock FROM products ORDER BY product_code")
 
     st.subheader("🧠 Akıllı Analiz")
@@ -179,7 +180,7 @@ def render_smart_analysis(query):
         ("Kritik Bakım Riski", critical_maintenance, "Makine", "#f0a11a"), ("Açık Öneri", len(recs), "Öncelikli aksiyon", "#159765")]):
         col.markdown(f'<div class="ai-kpi" style="--c:{colour}"><small>{label}</small><b>{value}</b><span>{note}</span></div>', unsafe_allow_html=True)
 
-    tabs = st.tabs(["Üretim Tahmini", "OEE Analizi", "Bakım Tahmini", "Otomatik Öneriler"])
+    tabs = st.tabs(["Üretim Tahmini", "OEE Analizi", "Bakım Tahmini", "5 Why Kök Neden", "Otomatik Öneriler"])
     with tabs[0]:
         st.markdown('<div class="ai-title">Önümüzdeki 8 Saat Üretim Tahmini</div>', unsafe_allow_html=True)
         if forecast.empty: st.info("Analiz edilecek üretim verisi bulunamadı.")
@@ -213,6 +214,17 @@ def render_smart_analysis(query):
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar":False}, key="smart_maintenance_chart")
             st.dataframe(maintenance_risk, hide_index=True, use_container_width=True)
     with tabs[3]:
+        from five_why_panel import render_five_why_tab
+        render_five_why_tab(
+            query,
+            execute,
+            current_user=current_user,
+            can_manage=can_manage,
+            notifier=notifier,
+            machines=machines,
+            sources={"alarms": alarms, "stops": stops, "maintenance": maintenance, "orders": orders, "quality": quality_events},
+        )
+    with tabs[4]:
         st.markdown('<div class="ai-title">Önceliklendirilmiş Otomatik Öneriler</div>', unsafe_allow_html=True)
         if recs.empty:
             st.success("Şu anda öncelikli aksiyon gerektiren bir risk bulunmuyor.")
@@ -223,3 +235,4 @@ def render_smart_analysis(query):
             st.download_button("Önerileri CSV olarak indir", recs.to_csv(index=False).encode("utf-8-sig"), "akilli-analiz-onerileri.csv", "text/csv", use_container_width=True)
 
     st.caption("Bu ekran açıklanabilir kural ve eğilim analizidir; sonuçlar kayıt kalitesine bağlıdır ve operasyon sorumlusunun kararıyla uygulanmalıdır.")
+
