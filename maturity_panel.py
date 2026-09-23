@@ -91,7 +91,9 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
             (SELECT COUNT(*) FROM machines WHERE planned_time>0 AND ideal_cycle>0) AS oee_ready,
             (SELECT COUNT(*) FROM machines WHERE last_maintenance IS NOT NULL AND next_maintenance IS NOT NULL) AS maintenance_dates,
             (SELECT COUNT(DISTINCT machine_code) FROM energy_readings) AS energy_machines,
-            (SELECT COUNT(*) FROM maintenance WHERE maintenance_type LIKE '%Periyodik%' OR maintenance_type LIKE '%Planlı%') AS planned_maintenance
+            (SELECT COUNT(*) FROM maintenance WHERE maintenance_type LIKE '%Periyodik%' OR maintenance_type LIKE '%Planlı%') AS planned_maintenance,
+            (SELECT COUNT(*) FROM five_why_analyses) AS five_why_analyses,
+            (SELECT COUNT(*) FROM five_why_analyses WHERE status='Tamamlandı') AS completed_five_why
     """)
     values = snapshot.iloc[0].to_dict() if not snapshot.empty else {}
 
@@ -126,6 +128,8 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
     maintenance_dates = count_value("maintenance_dates")
     energy_machines = count_value("energy_machines")
     planned_maintenance = count_value("planned_maintenance")
+    five_why_analyses = count_value("five_why_analyses")
+    completed_five_why = count_value("completed_five_why")
 
     categories = {
         "Üretim Dijitalleşmesi": [
@@ -192,7 +196,7 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
         "Sürekli İyileştirme": [
             _signal("Aksiyon takibi", 100 if alarm_actions else 0, "Alarm ve iyileştirme aksiyonlarını takip et", f"{alarm_actions} aksiyon"),
             _signal("Kök neden verisi", 100 if downtime and quality_reasons else (50 if downtime else 0), "Duruş ve kalite kök nedenlerini standartlaştır", "Duruş + kalite" if quality_reasons else "Kısmi"),
-            _signal("5 Why analizi", 0, "5 Why analiz formu ekle", "Yok"),
+            _signal("5 Why analizi", 100 if completed_five_why else (75 if five_why_analyses else 0), "5 Why kök neden analizi oluştur ve aksiyonu doğrulayarak kapat", f"{five_why_analyses} analiz · {completed_five_why} tamamlandı" if five_why_analyses else "Henüz yok"),
             _signal("Önce / sonra karşılaştırması", 0, "Kaizen önce/sonra KPI kaydı ekle", "Yok"),
             _signal("Sonuç ölçümü", 50 if audit else 0, "İyileştirme kazançlarını sayısallaştır", f"{audit} denetim kaydı"),
             _signal("Yönetim önerileri", 100 if machines else 0, "Önerileri aksiyon planına dönüştür", "Akıllı Analiz"),
@@ -221,11 +225,18 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
 
 def _save_assessment(query, execute, result, force=False):
     today = date.today().isoformat()
-    existing = query("SELECT id FROM digital_maturity_scores WHERE assessment_date=? ORDER BY id DESC LIMIT 1", (today,))
+    existing = query("SELECT id,overall_score FROM digital_maturity_scores WHERE assessment_date=? ORDER BY id DESC LIMIT 1", (today,))
     if not existing.empty and not force:
-        return int(existing.iloc[0]["id"]), False
-    assessment_id = int(uuid.uuid4().int % 2_000_000_000) or 1
-    execute("INSERT INTO digital_maturity_scores(id,assessment_date,overall_score,maturity_level,created_at) VALUES(?,?,?,?,?)", (assessment_id, today, result["overall"], f'{result["level_number"]} - {result["level_name"]}', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        assessment_id = int(existing.iloc[0]["id"])
+        if abs(float(existing.iloc[0]["overall_score"] or 0) - float(result["overall"])) < .01:
+            return assessment_id, False
+        # Gün içinde yeni bir yetenek (ör. 5 Why) devreye alındığında eski skoru
+        # bırakmak yerine bugünün değerlendirmesini ve kategori ayrıntılarını yenile.
+        execute("UPDATE digital_maturity_scores SET overall_score=?,maturity_level=? WHERE id=?", (result["overall"], f'{result["level_number"]} - {result["level_name"]}', assessment_id))
+        execute("DELETE FROM digital_maturity_categories WHERE assessment_id=?", (assessment_id,))
+    else:
+        assessment_id = int(uuid.uuid4().int % 2_000_000_000) or 1
+        execute("INSERT INTO digital_maturity_scores(id,assessment_date,overall_score,maturity_level,created_at) VALUES(?,?,?,?,?)", (assessment_id, today, result["overall"], f'{result["level_number"]} - {result["level_name"]}', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     category_values = []
     category_params = []
     for row in result["categories"]:
@@ -251,16 +262,20 @@ def render_maturity_panel(query, execute, *, using_postgres=False, api_configure
 
     st.markdown("""
     <style>
-    .dm-hero{display:grid;grid-template-columns:180px 1fr 210px;gap:18px;align-items:center;background:linear-gradient(125deg,#073f2d,#0b8653);color:#fff;border-radius:14px;padding:18px 22px;box-shadow:0 8px 25px rgba(4,84,47,.18);margin-bottom:10px}.dm-score{font-size:2.55rem;font-weight:950}.dm-score small{font-size:.9rem}.dm-level{font-size:1.05rem;font-weight:850}.dm-track{height:10px;background:rgba(255,255,255,.22);border-radius:99px;overflow:hidden;margin:9px 0}.dm-track i{display:block;height:100%;background:#68e3a0;border-radius:99px}.dm-meta{font-size:.7rem;color:#d4f5e2}.dm-card{border:1px solid #d6ebdf;border-radius:10px;background:linear-gradient(140deg,#fff,#f3fbf6);padding:11px 12px;min-height:112px}.dm-card b{font-size:.76rem;color:#174c36}.dm-card strong{display:block;font-size:1.35rem;color:#087847;margin:6px 0}.dm-card small{font-size:.64rem;color:#668274}.dm-action{border-left:4px solid var(--priority);background:#fff;border-radius:8px;padding:9px 11px;margin:6px 0;box-shadow:0 2px 8px rgba(5,80,44,.05)}.dm-action b{font-size:.73rem;color:#174b37}.dm-action span{display:block;font-size:.64rem;color:#6b8276;margin-top:3px}.dm-disclaimer{font-size:.68rem;color:#657f72;background:#f5faf7;border:1px solid #deeee5;border-radius:8px;padding:9px 11px;margin-top:8px}@media(max-width:900px){.dm-hero{grid-template-columns:1fr}.dm-card{min-height:auto}}
+    .dm-hero{display:grid;grid-template-columns:180px 1fr 210px;gap:18px;align-items:center;background:linear-gradient(125deg,#073f2d,#0b8653);color:#fff;border-radius:14px;padding:18px 22px;box-shadow:0 8px 25px rgba(4,84,47,.18);margin-bottom:10px}.dm-score{font-size:2.55rem;font-weight:950}.dm-score small{font-size:.9rem}.dm-level{font-size:1.05rem;font-weight:850}.dm-track{height:10px;background:rgba(255,255,255,.22);border-radius:99px;overflow:hidden;margin:9px 0}.dm-track i{display:block;height:100%;background:#68e3a0;border-radius:99px}.dm-meta{font-size:.7rem;color:#d4f5e2}.dm-kpi{min-height:126px;height:100%;box-sizing:border-box;border:1px solid #cfe6d8;border-radius:13px;background:linear-gradient(135deg,#fff,#f3faf6);padding:13px 15px;box-shadow:0 4px 13px rgba(5,78,44,.05)}.dm-kpi-label{font-size:.67rem;color:#547164;font-weight:800}.dm-kpi-value{font-size:clamp(1.05rem,1.75vw,1.62rem);line-height:1.12;font-weight:900;color:#174b37;margin:10px 0 8px;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;word-break:normal}.dm-kpi-note{display:inline-block;font-size:.62rem;color:#08794d;background:#e4f7eb;border-radius:99px;padding:3px 7px;font-weight:750}.dm-card{border:1px solid #d6ebdf;border-radius:10px;background:linear-gradient(140deg,#fff,#f3fbf6);padding:11px 12px;min-height:112px}.dm-card b{font-size:.76rem;color:#174c36}.dm-card strong{display:block;font-size:1.35rem;color:#087847;margin:6px 0}.dm-card small{font-size:.64rem;color:#668274}.dm-action{border-left:4px solid var(--priority);background:#fff;border-radius:8px;padding:9px 11px;margin:6px 0;box-shadow:0 2px 8px rgba(5,80,44,.05)}.dm-action b{font-size:.73rem;color:#174b37}.dm-action span{display:block;font-size:.64rem;color:#6b8276;margin-top:3px}.dm-disclaimer{font-size:.68rem;color:#657f72;background:#f5faf7;border:1px solid #deeee5;border-radius:8px;padding:9px 11px;margin-top:8px}@media(max-width:900px){.dm-hero{grid-template-columns:1fr}.dm-card{min-height:auto}.dm-kpi{min-height:105px}}
     </style>
     """, unsafe_allow_html=True)
     st.markdown(f'''<div class="dm-hero"><div><div class="dm-score">{result["overall"]:.1f}<small> / 100</small></div><div class="dm-meta">Dijital Fabrika Olgunluğu</div></div><div><div class="dm-level">Seviye {result["level_number"]} · {html.escape(result["level_name"])}</div><div class="dm-track"><i style="width:{result["overall"]}%"></i></div><div class="dm-meta">Son değerlendirme: {date.today():%d.%m.%Y}</div></div><div><div class="dm-meta">Önceki skor</div><b>{previous:.1f}</b><div class="dm-meta">Değişim: {change:+.1f} puan</div></div></div>''', unsafe_allow_html=True)
 
     kpis = st.columns(4, gap="small")
-    kpis[0].metric("Olgunluk Skoru", f'{result["overall"]:.1f}/100', f'{change:+.1f}')
-    kpis[1].metric("Seviye", f'{result["level_number"]} · {result["level_name"]}')
-    kpis[2].metric("En Güçlü Alan", strongest["Kategori"], f'%{strongest["Skor"]:.1f}')
-    kpis[3].metric("Öncelikli Gelişim", weakest["Kategori"], f'%{weakest["Skor"]:.1f}')
+    kpi_values = [
+        ("Olgunluk Skoru", f'{result["overall"]:.1f} / 100', f'Değişim {change:+.1f} puan'),
+        ("Seviye", f'{result["level_number"]} · {result["level_name"]}', "Mevcut dijital aşama"),
+        ("En Güçlü Alan", str(strongest["Kategori"]), f'Skor %{strongest["Skor"]:.1f}'),
+        ("Öncelikli Gelişim", str(weakest["Kategori"]), f'Skor %{weakest["Skor"]:.1f}'),
+    ]
+    for column, (label, value, note) in zip(kpis, kpi_values):
+        column.markdown(f'<div class="dm-kpi"><div class="dm-kpi-label">{html.escape(label)}</div><div class="dm-kpi-value">{html.escape(value)}</div><span class="dm-kpi-note">{html.escape(note)}</span></div>', unsafe_allow_html=True)
 
     radar_col, trend_col = st.columns([1.15, 1], gap="small")
     with radar_col, st.container(border=True):
