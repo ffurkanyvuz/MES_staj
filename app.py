@@ -397,6 +397,49 @@ def ensure_maturity_schema(database_identity, schema_version="digital-maturity-v
     return True
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_five_why_schema(database_identity, schema_version="five-why-v1"):
+    """5 Why analizlerini ve neden zincirini kalıcı olarak saklar."""
+    connection = conn()
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS five_why_analyses(
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            source_type TEXT,
+            source_id INTEGER,
+            machine_code TEXT,
+            event_description TEXT,
+            priority TEXT NOT NULL,
+            status TEXT NOT NULL,
+            owner TEXT,
+            due_date TEXT,
+            root_cause TEXT,
+            containment_action TEXT,
+            corrective_action TEXT,
+            verification_method TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS five_why_steps(
+            id INTEGER PRIMARY KEY,
+            analysis_id INTEGER NOT NULL,
+            step_no INTEGER NOT NULL,
+            question TEXT,
+            answer TEXT NOT NULL
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_five_why_status_due ON five_why_analyses(status,due_date)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_five_why_machine ON five_why_analyses(machine_code)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_five_why_steps_analysis ON five_why_steps(analysis_id,step_no)")
+    connection.commit()
+    connection.close()
+    return True
+
+
 def get_sensor_thresholds():
     values = DEFAULT_SENSOR_THRESHOLDS.copy()
     try:
@@ -1106,9 +1149,9 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk"},
-    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk"},
-    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz"},
+    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz"},
+    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz"},
 }
 
 NAV_LABELS = {
@@ -1682,6 +1725,7 @@ notification_database_identity = (
 ensure_notification_schema(notification_database_identity)
 ensure_spc_schema(notification_database_identity)
 ensure_maturity_schema(notification_database_identity)
+ensure_five_why_schema(notification_database_identity)
 
 
 # =========================================================
@@ -5855,7 +5899,13 @@ if selected_module == "📦 Stok":
 
 if selected_module == "🧠 Akıllı Analiz":
     from smart_analysis_panel import render_smart_analysis
-    render_smart_analysis(q)
+    render_smart_analysis(
+        q,
+        execute,
+        current_user=st.session_state.get("full_name") or st.session_state.get("username", ""),
+        can_manage=has_role("admin", "maintenance", "quality"),
+        notifier=create_notification,
+    )
 
 
     # =========================================================
