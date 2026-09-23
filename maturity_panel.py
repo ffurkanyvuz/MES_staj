@@ -60,32 +60,72 @@ def _signal(label, value, action, source):
 
 def calculate_maturity(query, *, using_postgres=False, api_configured=False):
     """Yalnızca sistemdeki gerçek özellik ve kayıtlardan açıklanabilir skor üretir."""
-    machines = _count(query, "machines")
-    production_history = _count(query, "production_history")
-    work_orders = _count(query, "work_orders")
-    shifts = _count(query, "shifts")
-    assignments = _count(query, "shift_machine_assignments")
-    sensors = _count(query, "sensors")
-    sensor_history = _count(query, "sensor_history")
-    alarms = _count(query, "alarms")
-    alarm_actions = _count(query, "alarm_actions")
-    quality = _count(query, "quality")
-    quality_reasons = _count(query, "quality", "WHERE COALESCE(defect_reason,'') NOT IN ('','Hata yok')")
-    spc = _count(query, "spc_measurements")
-    spc_alarms = _count(query, "alarms", "WHERE alarm LIKE 'SPC:%'")
-    maintenance = _count(query, "maintenance")
-    maintenance_requests = _count(query, "maintenance_requests")
-    downtime = _count(query, "downtime")
-    energy = _count(query, "energy_readings")
-    users = _count(query, "users", "WHERE is_active=1")
-    roles = int(_scalar(query, "SELECT COUNT(DISTINCT role) FROM users WHERE is_active=1", 0))
-    permissions = _count(query, "user_permissions")
-    audit = _count(query, "audit_log")
-    targeted_machines = int(_scalar(query, "SELECT COUNT(*) FROM machines WHERE COALESCE(target,0)>0", 0))
-    status_machines = int(_scalar(query, "SELECT COUNT(*) FROM machines WHERE status IN ('Çalışıyor','Beklemede','Arızalı')", 0))
-    oee_ready = int(_scalar(query, "SELECT COUNT(*) FROM machines WHERE planned_time>0 AND ideal_cycle>0", 0))
-    maintenance_dates = int(_scalar(query, "SELECT COUNT(*) FROM machines WHERE last_maintenance IS NOT NULL AND next_maintenance IS NOT NULL", 0))
-    energy_machines = int(_scalar(query, "SELECT COUNT(DISTINCT machine_code) FROM energy_readings", 0))
+    # Uzak PostgreSQL/Neon üzerinde her COUNT ayrı bir ağ gidiş-dönüşü demektir.
+    # Bütün olgunluk sinyallerini tek snapshot sorgusunda toplayarak modülün ilk
+    # açılışını belirgin biçimde hızlandırıyoruz.
+    snapshot = query("""
+        SELECT
+            (SELECT COUNT(*) FROM machines) AS machines,
+            (SELECT COUNT(*) FROM production_history) AS production_history,
+            (SELECT COUNT(*) FROM work_orders) AS work_orders,
+            (SELECT COUNT(*) FROM shifts) AS shifts,
+            (SELECT COUNT(*) FROM shift_machine_assignments) AS assignments,
+            (SELECT COUNT(*) FROM sensors) AS sensors,
+            (SELECT COUNT(*) FROM sensor_history) AS sensor_history,
+            (SELECT COUNT(*) FROM alarms) AS alarms,
+            (SELECT COUNT(*) FROM alarm_actions) AS alarm_actions,
+            (SELECT COUNT(*) FROM quality) AS quality,
+            (SELECT COUNT(*) FROM quality WHERE COALESCE(defect_reason,'') NOT IN ('','Hata yok')) AS quality_reasons,
+            (SELECT COUNT(*) FROM spc_measurements) AS spc,
+            (SELECT COUNT(*) FROM alarms WHERE alarm LIKE 'SPC:%') AS spc_alarms,
+            (SELECT COUNT(*) FROM maintenance) AS maintenance,
+            (SELECT COUNT(*) FROM maintenance_requests) AS maintenance_requests,
+            (SELECT COUNT(*) FROM downtime) AS downtime,
+            (SELECT COUNT(*) FROM energy_readings) AS energy,
+            (SELECT COUNT(*) FROM users WHERE is_active=1) AS users,
+            (SELECT COUNT(DISTINCT role) FROM users WHERE is_active=1) AS roles,
+            (SELECT COUNT(*) FROM user_permissions) AS permissions,
+            (SELECT COUNT(*) FROM audit_log) AS audit,
+            (SELECT COUNT(*) FROM machines WHERE COALESCE(target,0)>0) AS targeted_machines,
+            (SELECT COUNT(*) FROM machines WHERE status IN ('Çalışıyor','Beklemede','Arızalı')) AS status_machines,
+            (SELECT COUNT(*) FROM machines WHERE planned_time>0 AND ideal_cycle>0) AS oee_ready,
+            (SELECT COUNT(*) FROM machines WHERE last_maintenance IS NOT NULL AND next_maintenance IS NOT NULL) AS maintenance_dates,
+            (SELECT COUNT(DISTINCT machine_code) FROM energy_readings) AS energy_machines,
+            (SELECT COUNT(*) FROM maintenance WHERE maintenance_type LIKE '%Periyodik%' OR maintenance_type LIKE '%Planlı%') AS planned_maintenance
+    """)
+    values = snapshot.iloc[0].to_dict() if not snapshot.empty else {}
+
+    def count_value(name):
+        value = values.get(name, 0)
+        return 0 if pd.isna(value) else int(value)
+
+    machines = count_value("machines")
+    production_history = count_value("production_history")
+    work_orders = count_value("work_orders")
+    shifts = count_value("shifts")
+    assignments = count_value("assignments")
+    sensors = count_value("sensors")
+    sensor_history = count_value("sensor_history")
+    alarms = count_value("alarms")
+    alarm_actions = count_value("alarm_actions")
+    quality = count_value("quality")
+    quality_reasons = count_value("quality_reasons")
+    spc = count_value("spc")
+    spc_alarms = count_value("spc_alarms")
+    maintenance = count_value("maintenance")
+    maintenance_requests = count_value("maintenance_requests")
+    downtime = count_value("downtime")
+    energy = count_value("energy")
+    users = count_value("users")
+    roles = count_value("roles")
+    permissions = count_value("permissions")
+    audit = count_value("audit")
+    targeted_machines = count_value("targeted_machines")
+    status_machines = count_value("status_machines")
+    oee_ready = count_value("oee_ready")
+    maintenance_dates = count_value("maintenance_dates")
+    energy_machines = count_value("energy_machines")
+    planned_maintenance = count_value("planned_maintenance")
 
     categories = {
         "Üretim Dijitalleşmesi": [
@@ -125,7 +165,7 @@ def calculate_maturity(query, *, using_postgres=False, api_configured=False):
         "Bakım Yönetimi": [
             _signal("Bakım kayıtları", 100 if maintenance else 0, "Bakım kayıtlarını sisteme gir", f"{maintenance} kayıt"),
             _signal("Sonraki bakım tarihleri", 100 if maintenance_dates else 0, "Makine bakım tarihlerini tamamla", f"{maintenance_dates} makine"),
-            _signal("Planlı bakım", 100 if _count(query, "maintenance", "WHERE maintenance_type LIKE '%Periyodik%' OR maintenance_type LIKE '%Planlı%'") else 0, "Planlı bakım programı oluştur", "Kayıt kontrolü"),
+            _signal("Planlı bakım", 100 if planned_maintenance else 0, "Planlı bakım programı oluştur", f"{planned_maintenance} kayıt"),
             _signal("Arıza geçmişi", 100 if downtime else 0, "Arıza ve duruş nedenlerini kaydet", f"{downtime} duruş"),
             _signal("Dijital bakım talepleri", 100 if maintenance_requests else 0, "Bakım talebi iş akışını kullan", f"{maintenance_requests} talep"),
             _signal("Bakım sorumlusu/aksiyon", 100 if maintenance_requests else 0, "Teknisyen atama ve kapatma akışını kullan", "Aktif" if maintenance_requests else "Yok"),
@@ -186,8 +226,16 @@ def _save_assessment(query, execute, result, force=False):
         return int(existing.iloc[0]["id"]), False
     assessment_id = int(uuid.uuid4().int % 2_000_000_000) or 1
     execute("INSERT INTO digital_maturity_scores(id,assessment_date,overall_score,maturity_level,created_at) VALUES(?,?,?,?,?)", (assessment_id, today, result["overall"], f'{result["level_number"]} - {result["level_name"]}', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    category_values = []
+    category_params = []
     for row in result["categories"]:
-        execute("INSERT INTO digital_maturity_categories(id,assessment_id,category_name,score,weight,details) VALUES(?,?,?,?,?,?)", (int(uuid.uuid4().int % 2_000_000_000) or 1, assessment_id, row["Kategori"], row["Skor"], row["Ağırlık"], json.dumps(row["Kontroller"], ensure_ascii=False)))
+        category_values.append("(?,?,?,?,?,?)")
+        category_params.extend((int(uuid.uuid4().int % 2_000_000_000) or 1, assessment_id, row["Kategori"], row["Skor"], row["Ağırlık"], json.dumps(row["Kontroller"], ensure_ascii=False)))
+    if category_values:
+        execute(
+            "INSERT INTO digital_maturity_categories(id,assessment_id,category_name,score,weight,details) VALUES " + ",".join(category_values),
+            tuple(category_params),
+        )
     return assessment_id, True
 
 
