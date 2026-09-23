@@ -637,7 +637,11 @@ def _render_chat_tab(tools, summary, api_key, model, current_role):
             if message.get("sources"):
                 st.markdown("".join(f'<span class="trex-ai-source">{TOOL_LABELS.get(source, source)}</span>' for source in message["sources"]), unsafe_allow_html=True)
 
-    typed_prompt = st.chat_input("Normal konuşabilirsin: ‘CNC iki niye düşük?’")
+    typed_prompt = st.chat_input(
+        "TREX AI'a mesaj yaz...",
+        key="factory_ai_chat_input",
+        max_chars=1200,
+    )
     prompt = selected_prompt or typed_prompt
     if prompt:
         history = [item for item in messages if item["role"] in ("user", "assistant")]
@@ -721,7 +725,10 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
       .trex-ai-kpi{border:1px solid #d8e9e0;border-radius:12px;background:#fff;padding:11px 13px;min-height:82px}.trex-ai-kpi small{font-size:9px;font-weight:800;color:#617b6f;letter-spacing:.04em}.trex-ai-kpi strong{display:block;color:#07543a;font-size:21px;line-height:30px}.trex-ai-kpi span{font-size:10px;color:#6a8377}
       .trex-priority{display:grid;grid-template-columns:30px 1fr 42px;gap:10px;align-items:center;border:1px solid #dcebe4;border-left:4px solid var(--priority);border-radius:11px;padding:10px 12px;margin:8px 0;background:#fff}.trex-priority-rank{width:27px;height:27px;border-radius:50%;display:grid;place-items:center;background:#eef8f3;color:#07543a;font-weight:850}.trex-priority small{font-size:8px;color:#6a8377;font-weight:800}.trex-priority strong{display:block;color:#113f30;font-size:12px;margin:2px 0}.trex-priority p{font-size:10px;color:#5c7469;margin:0}.trex-priority>b{color:var(--priority);font-size:17px;text-align:right}
       .trex-confidence{background:linear-gradient(135deg,#063f2e,#0d9664);border-radius:14px;padding:18px;color:white;margin-bottom:14px}.trex-confidence small{font-size:9px;color:#ccebdd;font-weight:800}.trex-confidence strong{display:block;font-size:34px}.trex-confidence p{font-size:11px;color:#d9f3e7;margin:0}
-      [data-testid="stChatMessage"]{border:0;border-radius:14px;padding:8px 12px;margin:5px 0;background:#f5faf7;box-shadow:none}[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]){background:#eef8f3;margin-left:12%}[data-testid="stChatInput"]{border:1px solid #bddfce;border-radius:15px;box-shadow:0 7px 22px rgba(8,92,61,.08)}
+      [data-testid="stChatMessage"]{max-width:900px;margin:7px auto;border:0;border-radius:16px;padding:10px 14px;background:#f5faf7;box-shadow:none}[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]){background:#eaf7f0;margin-left:max(12%,calc((100% - 900px)/2 + 80px));margin-right:max(0px,calc((100% - 900px)/2))}
+      [data-testid="stChatInput"]{max-width:900px;margin-left:auto;margin-right:auto;border:1px solid #add8c2;border-radius:18px;box-shadow:0 8px 28px rgba(8,92,61,.14);background:#fff}[data-testid="stChatInput"] textarea{min-height:48px!important;padding-top:13px!important;font-size:13px!important}[data-testid="stChatInput"] button{border-radius:50%!important;background:#0b8f5e!important;color:white!important}
+      div[data-testid="stRadio"]>div{justify-content:center;gap:5px;margin:7px 0 10px}div[data-testid="stRadio"] label{background:#f2f8f5;border:1px solid #d5e7de;border-radius:18px;padding:5px 13px!important}div[data-testid="stRadio"] label:has(input:checked){background:#087c55;border-color:#087c55;color:white}
+      .stApp:has([data-testid="stChatInput"]) .main .block-container{padding-bottom:8rem!important}
     </style>
     """, unsafe_allow_html=True)
     mode_label = f"OpenAI · {model}" if connected else "Yerel analiz modu"
@@ -743,11 +750,17 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
     for column, (label, value, note) in zip(kpis, kpi_values):
         column.markdown(f'<div class="trex-ai-kpi"><small>{label}</small><strong>{value}</strong><span>{note}</span></div>', unsafe_allow_html=True)
 
-    chat_tab, briefing_tab, quality_tab = st.tabs(["Asistana Sor", "Yönetim Brifingi", "Veri Güveni"])
-    with chat_tab:
+    workspace = st.radio(
+        "TREX AI çalışma alanı",
+        ["Asistana Sor", "Yönetim Brifingi", "Veri Güveni"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="factory_ai_workspace",
+    )
+    if workspace == "Asistana Sor":
         _render_chat_tab(tools, summary, api_key, model, current_role)
-    with briefing_tab:
+    elif workspace == "Yönetim Brifingi":
         _render_briefing_tab(summary, priorities, current_name)
-    with quality_tab:
+    else:
         _render_data_quality_tab(quality_checks, confidence, summary)
 
