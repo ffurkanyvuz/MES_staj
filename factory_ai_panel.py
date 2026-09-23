@@ -382,16 +382,17 @@ def _local_answer(question, tools):
         f"**Yönetici özeti:** Üretim {summary['production']:,}/{summary['target']:,} adet ve hedef gerçekleşme %{summary['target_attainment_pct']:.1f}. Ortalama OEE %{summary['average_oee_pct']:.1f}.",
         f"**Kritik görünüm:** {sum(summary['open_alarms'].values())} açık alarm, {summary['late_work_orders']} geciken iş emri, {summary['overdue_maintenance']} geciken bakım ve {summary['overdue_actions']} geciken aksiyon var.",
     ]
-    if "bakım" in text or "risk" in text:
+    allowed = tools.allowed_names()
+    if ("bakım" in text or "risk" in text) and "get_maintenance_risks" in allowed:
         used.append("get_maintenance_risks")
         risks = tools.maintenance_risks()["risks"][:3]
         lines.append("**Öncelikli bakım:** " + "; ".join(f"{item['machine']} · {item['risk_score']}/100 ({', '.join(item['reasons'])})" for item in risks))
-    elif "duruş" in text or "kayıp" in text:
+    elif ("duruş" in text or "kayıp" in text) and "get_downtime_analysis" in allowed:
         used.append("get_downtime_analysis")
         stop = tools.downtime_analysis()
         reasons = "; ".join(f"{item['reason']}: {item['minutes']:.0f} dk" for item in stop["by_reason"][:3])
         lines.append(f"**Duruş odağı:** Toplam {stop['total_minutes']:.0f} dk. {reasons or 'Neden kaydı bulunamadı.'}")
-    elif "vardiya" in text:
+    elif "vardiya" in text and "compare_shifts" in allowed:
         used.append("compare_shifts")
         shifts = tools.compare_shifts()["shifts"]
         lines.append("**Vardiyalar:** " + "; ".join(f"{item['shift']} %{item['attainment_pct']:.1f} hedef, %{item['average_oee_pct']:.1f} OEE" for item in shifts))
@@ -407,33 +408,62 @@ def _local_answer(question, tools):
     return "\n\n".join(lines), used
 
 
-def render_factory_ai(query, *, current_username="", current_name="", current_role="operator"):
-    api_key = _setting("OPENAI_API_KEY")
-    model = _setting("OPENAI_MODEL", "gpt-5-mini")
-    tools = MesReadTools(query, current_role)
-    summary = tools.factory_summary()
+def _management_snapshot(tools, summary):
+    """API çağrısı yapmadan yönetim toplantısı için öncelik ve veri güveni üretir."""
+    priorities = []
+    alarm_total = sum(summary["open_alarms"].values())
+    critical_alarms = int(summary["open_alarms"].get("Kritik", 0))
+    if alarm_total:
+        priorities.append({"score": min(100, 55 + critical_alarms * 15), "area": "Alarm", "title": f"{alarm_total} açık alarm", "detail": f"{critical_alarms} kritik alarm için sahip ve müdahale süresi doğrulanmalı.", "module": "Alarm Yönetimi"})
+    if summary["overdue_actions"]:
+        priorities.append({"score": min(100, 60 + summary["overdue_actions"] * 8), "area": "Aksiyon", "title": f"{summary['overdue_actions']} geciken aksiyon", "detail": "Sorumlu ve yeni termin kararı yönetim toplantısında netleştirilmeli.", "module": "Aksiyon Merkezi"})
+    if summary["overdue_maintenance"]:
+        priorities.append({"score": min(100, 55 + summary["overdue_maintenance"] * 8), "area": "Bakım", "title": f"{summary['overdue_maintenance']} geciken bakım", "detail": "Arıza riskini azaltmak için bakım sırası kapasite planıyla eşleştirilmeli.", "module": "Bakım Yönetimi"})
+    if summary["late_work_orders"]:
+        priorities.append({"score": min(100, 50 + summary["late_work_orders"] * 8), "area": "Üretim", "title": f"{summary['late_work_orders']} geciken iş emri", "detail": "Kalan miktar, darboğaz makine ve termin etkisi birlikte değerlendirilmelidir.", "module": "İş Emirleri"})
+    for machine in sorted(summary["machines"], key=lambda item: item["oee_pct"])[:2]:
+        if machine["oee_pct"] < 65:
+            priorities.append({"score": min(100, round(100 - machine["oee_pct"])), "area": "OEE", "title": f"{machine['machine']} · %{machine['oee_pct']:.1f} OEE", "detail": f"{machine['status']} · {machine['production']:,}/{machine['target']:,} adet. En zayıf OEE bileşeni incelenmeli.", "module": "Makine Detayı"})
+    priorities = sorted(priorities, key=lambda item: item["score"], reverse=True)[:6]
+
+    machines = tools.machines.copy()
+    checks = []
+    if not machines.empty:
+        for label, column in [("Operatör ataması", "operator"), ("Ürün tanımı", "product"), ("Vardiya ataması", "shift")]:
+            complete = machines[column].fillna("").astype(str).str.strip().ne("").mean() * 100
+            checks.append({"label": label, "score": round(float(complete))})
+        checks.append({"label": "Üretim hedefi", "score": round(float((pd.to_numeric(machines["target"], errors="coerce").fillna(0) > 0).mean() * 100))})
+        checks.append({"label": "Planlı süre", "score": round(float((pd.to_numeric(machines["planned_time"], errors="coerce").fillna(0) > 0).mean() * 100))})
+        sensors = _safe_query(tools.query, "SELECT machine_code,timestamp FROM sensors")
+        sensor_codes = set(sensors["machine_code"].dropna().astype(str)) if not sensors.empty else set()
+        checks.append({"label": "Sensör kapsamı", "score": round(len(sensor_codes.intersection(tools.machine_codes)) / len(tools.machine_codes) * 100) if tools.machine_codes else 0})
+    confidence = round(sum(item["score"] for item in checks) / len(checks)) if checks else 0
+    return priorities, checks, confidence
+
+
+def _brief_markdown(summary, priorities, current_name):
+    lines = [
+        "# TREX MES · Yönetim Toplantısı Brifingi",
+        f"**Hazırlanma:** {summary['as_of']}  |  **Hazırlayan:** {current_name or 'TREX Fabrika Asistanı'}",
+        "",
+        "## Operasyon özeti",
+        f"- Üretim: **{summary['production']:,} / {summary['target']:,} adet** (%{summary['target_attainment_pct']:.1f})",
+        f"- Ortalama OEE: **%{summary['average_oee_pct']:.1f}**",
+        f"- Açık alarm: **{sum(summary['open_alarms'].values())}**",
+        f"- Geciken iş emri / bakım / aksiyon: **{summary['late_work_orders']} / {summary['overdue_maintenance']} / {summary['overdue_actions']}**",
+        "",
+        "## Bugünün öncelikleri",
+    ]
+    if priorities:
+        lines.extend(f"{index}. **[{item['area']}] {item['title']}** — {item['detail']} (Öncelik {item['score']}/100)" for index, item in enumerate(priorities, 1))
+    else:
+        lines.append("- Kritik operasyon önceliği tespit edilmedi.")
+    lines += ["", "## Toplantıda verilecek kararlar", "- İlk üç öncelik için sorumlu ve termin belirleyin.", "- Üretim hedefi üzerindeki tahmini etkiyi doğrulayın.", "- Vardiya devrinde açık kalan aksiyonları takip edin.", "", "_Bu brifing canlı MES kayıtlarından otomatik hazırlanmıştır._"]
+    return "\n".join(lines)
+
+
+def _render_chat_tab(tools, summary, api_key, model, current_role):
     connected = bool(api_key)
-
-    st.markdown("""
-    <style>
-      .trex-ai-hero{background:linear-gradient(120deg,#063d2d 0%,#087c55 58%,#16a56d 100%);border-radius:16px;padding:20px 23px;color:white;box-shadow:0 10px 28px rgba(5,84,57,.16);margin-bottom:12px}
-      .trex-ai-hero h2{font-size:23px;margin:0 0 5px;color:white}.trex-ai-hero p{margin:0;color:#d8f5e7;font-size:13px}
-      .trex-ai-tags{display:flex;gap:7px;flex-wrap:wrap;margin-top:13px}.trex-ai-tag{background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:5px 10px;font-size:10px;font-weight:750}
-      .trex-insight{border:1px solid #d5e8df;border-radius:13px;background:linear-gradient(145deg,#fff,#f3fbf7);padding:15px;margin-bottom:10px;min-height:112px}
-      .trex-insight small{color:#648174;font-weight:750}.trex-insight strong{display:block;color:#07553b;font-size:22px;margin:6px 0}.trex-insight p{font-size:11px;color:#48685a;margin:0}
-      .trex-ai-source{display:inline-block;background:#e8f7ef;color:#08754f;border-radius:12px;padding:3px 8px;margin:2px;font-size:9px;font-weight:750}
-      [data-testid="stChatMessage"]{border:1px solid #dfebe5;border-radius:13px;padding:5px 10px;background:rgba(255,255,255,.75)}
-    </style>
-    """, unsafe_allow_html=True)
-    mode_label = f"OpenAI · {model}" if connected else "Yerel analiz modu"
-    st.markdown(f"""
-      <div class="trex-ai-hero">
-        <h2>TREX Fabrika Asistanı</h2>
-        <p>MES verilerini okuyup üretim problemlerini kanıtlarıyla açıklayan yönetici karar desteği</p>
-        <div class="trex-ai-tags"><span class="trex-ai-tag">MES verisine bağlı</span><span class="trex-ai-tag">Salt okunur</span><span class="trex-ai-tag">{mode_label}</span><span class="trex-ai-tag">Rol bazlı erişim</span></div>
-      </div>
-    """, unsafe_allow_html=True)
-
     left, right = st.columns([2.25, 1], gap="large")
     with right:
         st.markdown("#### Bugünün İçgörüsü")
@@ -451,14 +481,13 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
 
     with left:
         st.markdown("#### Ne bilmek istiyorsunuz?")
-        quick_questions = [
-            "Bugünün kritik durumlarını özetle",
-            "En düşük OEE hangi makinede, neden?",
-            "Geciken aksiyonları analiz et",
-            "Bakım riski olan makineleri sırala",
-            "Vardiyaları karşılaştır",
-            "Yönetim toplantısı için kısa özet hazırla",
-        ]
+        quick_questions = ["Bugünün kritik durumlarını özetle", "En düşük OEE hangi makinede, neden?", "Geciken aksiyonları analiz et", "Yönetim toplantısı için kısa özet hazırla"]
+        if "get_maintenance_risks" in tools.allowed_names():
+            quick_questions.append("Bakım riski olan makineleri sırala")
+        if "compare_shifts" in tools.allowed_names():
+            quick_questions.append("Vardiyaları karşılaştır")
+        if "get_quality_summary" in tools.allowed_names():
+            quick_questions.append("En önemli kalite kaybını açıkla")
         button_cols = st.columns(3)
         selected_prompt = ""
         for index, question in enumerate(quick_questions):
@@ -484,10 +513,7 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
             with st.chat_message("assistant"):
                 with st.spinner("MES verileri inceleniyor..."):
                     try:
-                        if connected:
-                            answer, sources = _ask_openai(api_key, model, prompt, history, tools)
-                        else:
-                            answer, sources = _local_answer(prompt, tools)
+                        answer, sources = _ask_openai(api_key, model, prompt, history, tools) if connected else _local_answer(prompt, tools)
                     except Exception as exc:
                         answer, sources = _local_answer(prompt, tools)
                         if current_role == "admin":
@@ -497,4 +523,90 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
             messages.append({"role": "assistant", "content": answer, "sources": list(dict.fromkeys(sources))})
             st.session_state["factory_ai_messages"] = messages[-12:]
 
+
+def _render_briefing_tab(summary, priorities, current_name):
+    left, right = st.columns([1.55, 1], gap="large")
+    with left:
+        st.markdown("#### Bugünün öncelik sırası")
+        if not priorities:
+            st.success("Kritik öncelik görünmüyor. Standart vardiya planıyla devam edilebilir.")
+        for index, item in enumerate(priorities, 1):
+            colour = "#ef4444" if item["score"] >= 70 else ("#f59e0b" if item["score"] >= 45 else "#18a66a")
+            st.markdown(f"""<div class="trex-priority" style="--priority:{colour}"><div class="trex-priority-rank">{index}</div><div><small>{item['area'].upper()} · {item['module']}</small><strong>{item['title']}</strong><p>{item['detail']}</p></div><b>{item['score']}</b></div>""", unsafe_allow_html=True)
+    with right:
+        st.markdown("#### 10 dakikalık toplantı akışı")
+        for minute, title, detail in [("0–2 dk", "Emniyet ve kritik alarmlar", "Kritik alarm, arıza ve duruşları doğrula."), ("2–5 dk", "Hedef ve darboğaz", "En düşük OEE ve geciken iş emrini değerlendir."), ("5–8 dk", "Bakım ve kalite riski", "Geciken bakım ile kalite kaybını sırala."), ("8–10 dk", "Karar ve sahiplik", "İlk üç aksiyona sorumlu ve termin ver.")]:
+            st.markdown(f"**{minute} · {title}**  \n{detail}")
+        report = _brief_markdown(summary, priorities, current_name)
+        st.download_button("Yönetim brifingini indir", report.encode("utf-8-sig"), file_name=f"trex-yonetim-brifingi-{date.today().isoformat()}.md", mime="text/markdown", use_container_width=True)
+        st.caption("Brifing API kullanmadan canlı MES verilerinden hazırlanır.")
+
+
+def _render_data_quality_tab(checks, confidence, summary):
+    left, right = st.columns([1.35, 1], gap="large")
+    with left:
+        st.markdown("#### Veri güveni")
+        st.markdown(f"""<div class="trex-confidence"><small>ANALİZ GÜVEN SKORU</small><strong>%{confidence}</strong><p>Makine ana verisi, vardiya ataması, hedef ve sensör kapsamı</p></div>""", unsafe_allow_html=True)
+        for item in checks:
+            st.write(f"**{item['label']}** · %{item['score']}")
+            st.progress(item["score"] / 100)
+    with right:
+        st.markdown("#### Skoru yükseltmek için")
+        missing = [item for item in checks if item["score"] < 100]
+        if not missing:
+            st.success("Temel analiz alanlarının tamamı dolu.")
+        for item in sorted(missing, key=lambda value: value["score"]):
+            st.markdown(f"- **{item['label']}** kapsamı %{item['score']}. Eksik makine kayıtlarını tamamlayın.")
+        st.info("Bu skor yapay zekânın doğruluğunu değil, yanıt verirken kullanabildiği MES verisinin kapsamını gösterir.")
+        st.caption(f"Veri anı: {summary['as_of']} · {len(summary['machines'])} makine")
+
+
+def render_factory_ai(query, *, current_username="", current_name="", current_role="operator"):
+    api_key = _setting("OPENAI_API_KEY")
+    model = _setting("OPENAI_MODEL", "gpt-5-mini")
+    tools = MesReadTools(query, current_role)
+    summary = tools.factory_summary()
+    connected = bool(api_key)
+    priorities, quality_checks, confidence = _management_snapshot(tools, summary)
+
+    st.markdown("""
+    <style>
+      .trex-ai-hero{background:linear-gradient(120deg,#063d2d 0%,#087c55 58%,#16a56d 100%);border-radius:16px;padding:20px 23px;color:white;box-shadow:0 10px 28px rgba(5,84,57,.16);margin-bottom:12px}
+      .trex-ai-hero h2{font-size:23px;margin:0 0 5px;color:white}.trex-ai-hero p{margin:0;color:#d8f5e7;font-size:13px}
+      .trex-ai-tags{display:flex;gap:7px;flex-wrap:wrap;margin-top:13px}.trex-ai-tag{background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:5px 10px;font-size:10px;font-weight:750}
+      .trex-insight{border:1px solid #d5e8df;border-radius:13px;background:linear-gradient(145deg,#fff,#f3fbf7);padding:15px;margin-bottom:10px;min-height:112px}
+      .trex-insight small{color:#648174;font-weight:750}.trex-insight strong{display:block;color:#07553b;font-size:22px;margin:6px 0}.trex-insight p{font-size:11px;color:#48685a;margin:0}
+      .trex-ai-source{display:inline-block;background:#e8f7ef;color:#08754f;border-radius:12px;padding:3px 8px;margin:2px;font-size:9px;font-weight:750}
+      .trex-ai-kpi{border:1px solid #d8e9e0;border-radius:12px;background:#fff;padding:11px 13px;min-height:82px}.trex-ai-kpi small{font-size:9px;font-weight:800;color:#617b6f;letter-spacing:.04em}.trex-ai-kpi strong{display:block;color:#07543a;font-size:21px;line-height:30px}.trex-ai-kpi span{font-size:10px;color:#6a8377}
+      .trex-priority{display:grid;grid-template-columns:30px 1fr 42px;gap:10px;align-items:center;border:1px solid #dcebe4;border-left:4px solid var(--priority);border-radius:11px;padding:10px 12px;margin:8px 0;background:#fff}.trex-priority-rank{width:27px;height:27px;border-radius:50%;display:grid;place-items:center;background:#eef8f3;color:#07543a;font-weight:850}.trex-priority small{font-size:8px;color:#6a8377;font-weight:800}.trex-priority strong{display:block;color:#113f30;font-size:12px;margin:2px 0}.trex-priority p{font-size:10px;color:#5c7469;margin:0}.trex-priority>b{color:var(--priority);font-size:17px;text-align:right}
+      .trex-confidence{background:linear-gradient(135deg,#063f2e,#0d9664);border-radius:14px;padding:18px;color:white;margin-bottom:14px}.trex-confidence small{font-size:9px;color:#ccebdd;font-weight:800}.trex-confidence strong{display:block;font-size:34px}.trex-confidence p{font-size:11px;color:#d9f3e7;margin:0}
+      [data-testid="stChatMessage"]{border:1px solid #dfebe5;border-radius:13px;padding:5px 10px;background:rgba(255,255,255,.75)}
+    </style>
+    """, unsafe_allow_html=True)
+    mode_label = f"OpenAI · {model}" if connected else "Yerel analiz modu"
+    st.markdown(f"""
+      <div class="trex-ai-hero">
+        <h2>TREX Fabrika Asistanı</h2>
+        <p>MES verilerini okuyup üretim problemlerini kanıtlarıyla açıklayan yönetici karar desteği</p>
+        <div class="trex-ai-tags"><span class="trex-ai-tag">MES verisine bağlı</span><span class="trex-ai-tag">Salt okunur</span><span class="trex-ai-tag">{mode_label}</span><span class="trex-ai-tag">Rol bazlı erişim</span></div>
+      </div>
+    """, unsafe_allow_html=True)
+
+    kpis = st.columns(4)
+    kpi_values = [
+        ("HEDEF GERÇEKLEŞME", f"%{summary['target_attainment_pct']:.1f}", f"{summary['production']:,} / {summary['target']:,} adet"),
+        ("ORTALAMA OEE", f"%{summary['average_oee_pct']:.1f}", f"{len(summary['machines'])} makine"),
+        ("AÇIK KRİTİKLER", str(sum(summary['open_alarms'].values()) + summary['overdue_actions']), "Alarm + geciken aksiyon"),
+        ("VERİ GÜVENİ", f"%{confidence}", "Analiz kapsam skoru"),
+    ]
+    for column, (label, value, note) in zip(kpis, kpi_values):
+        column.markdown(f'<div class="trex-ai-kpi"><small>{label}</small><strong>{value}</strong><span>{note}</span></div>', unsafe_allow_html=True)
+
+    chat_tab, briefing_tab, quality_tab = st.tabs(["Asistana Sor", "Yönetim Brifingi", "Veri Güveni"])
+    with chat_tab:
+        _render_chat_tab(tools, summary, api_key, model, current_role)
+    with briefing_tab:
+        _render_briefing_tab(summary, priorities, current_name)
+    with quality_tab:
+        _render_data_quality_tab(quality_checks, confidence, summary)
 
