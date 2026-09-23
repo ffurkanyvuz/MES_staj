@@ -2570,9 +2570,6 @@ if "dark_mode_enabled" not in st.session_state:
     st.session_state["dark_mode_enabled"] = False
 if "critical_focus_enabled" not in st.session_state:
     st.session_state["critical_focus_enabled"] = False
-if "bulk_action_enabled" not in st.session_state:
-    st.session_state["bulk_action_enabled"] = False
-
 if st.session_state["dark_mode_enabled"]:
     st.markdown("""
     <style>
@@ -2924,54 +2921,6 @@ if st.session_state.get("critical_focus_enabled", False):
     if focus_maintenance_col.button("Geciken bakımlar", key="focus_open_maintenance", use_container_width=True):
         st.session_state["selected_module"] = "🔧 Bakım"; st.rerun()
 
-if st.session_state.get("bulk_action_enabled", False):
-    with st.expander("Toplu İşlem Merkezi", expanded=True):
-        bulk_options = []
-        if has_role("admin", "maintenance"):
-            bulk_options.append("Alarmları onayla")
-        if has_role("admin", "operator"):
-            bulk_options.append("İş emirlerinin durumunu değiştir")
-        if not bulk_options:
-            st.info("Rolünüz için kullanılabilir toplu işlem bulunmuyor.")
-        else:
-            bulk_action_type = st.selectbox("İşlem türü", bulk_options, key="bulk_action_type")
-            if bulk_action_type == "Alarmları onayla":
-                bulk_alarm_rows = q("SELECT id,machine_code,alarm,level,time FROM alarms WHERE acknowledged=0 ORDER BY id DESC LIMIT 100")
-                if bulk_alarm_rows.empty:
-                    st.success("Onay bekleyen alarm bulunmuyor.")
-                else:
-                    bulk_alarm_labels = {int(row["id"]): f'{row["machine_code"]} · {row["level"]} · {row["alarm"]}' for _, row in bulk_alarm_rows.iterrows()}
-                    selected_bulk_alarms = st.multiselect("Alarmlar", list(bulk_alarm_labels), format_func=lambda item: bulk_alarm_labels[item], key="bulk_alarm_ids")
-                    if st.button("Seçilen Alarmları Onayla", type="primary", disabled=not selected_bulk_alarms, key="bulk_ack_alarms", use_container_width=True):
-                        for alarm_id in selected_bulk_alarms:
-                            execute("UPDATE alarms SET acknowledged=1 WHERE id=?", (int(alarm_id),))
-                        register_undo(
-                            f"{len(selected_bulk_alarms)} alarm toplu onaylandı",
-                            [("UPDATE alarms SET acknowledged=0 WHERE id=?", (int(alarm_id),)) for alarm_id in selected_bulk_alarms]
-                        )
-                        audit_event("Alarmları toplu onayladı", "Alarm", f"Kayıtlar: {selected_bulk_alarms}")
-                        st.success(f"{len(selected_bulk_alarms)} alarm onaylandı.")
-                        st.rerun()
-            else:
-                bulk_order_rows = q("SELECT id,order_no,machine_code,product,status FROM work_orders WHERE status NOT IN ('Tamamlandı','İptal') ORDER BY id DESC LIMIT 100")
-                if bulk_order_rows.empty:
-                    st.success("Güncellenecek aktif iş emri bulunmuyor.")
-                else:
-                    bulk_order_labels = {int(row["id"]): f'{row["order_no"]} · {row["machine_code"]} · {row["product"]} · {row["status"]}' for _, row in bulk_order_rows.iterrows()}
-                    selected_bulk_orders = st.multiselect("İş emirleri", list(bulk_order_labels), format_func=lambda item: bulk_order_labels[item], key="bulk_order_ids")
-                    bulk_order_status = st.selectbox("Yeni durum", ["Sırada", "Bekliyor", "Üretimde"], key="bulk_order_status")
-                    if st.button("Seçilen İş Emirlerini Güncelle", type="primary", disabled=not selected_bulk_orders, key="bulk_update_orders", use_container_width=True):
-                        previous_order_statuses = bulk_order_rows[bulk_order_rows["id"].isin(selected_bulk_orders)][["id", "status"]].copy()
-                        for order_id in selected_bulk_orders:
-                            execute("UPDATE work_orders SET status=? WHERE id=?", (bulk_order_status, int(order_id)))
-                        register_undo(
-                            f"{len(selected_bulk_orders)} iş emri toplu güncellendi",
-                            [("UPDATE work_orders SET status=? WHERE id=?", (row["status"], int(row["id"]))) for _, row in previous_order_statuses.iterrows()]
-                        )
-                        audit_event("İş emirlerini toplu güncelledi", "İş Emri", f"{selected_bulk_orders} · {bulk_order_status}")
-                        st.success(f"{len(selected_bulk_orders)} iş emri '{bulk_order_status}' durumuna alındı.")
-                        st.rerun()
-
 with st.sidebar:
     role_label = ROLE_LABELS.get(st.session_state.get("role"), "KULLANICI")
     st.markdown(
@@ -2991,11 +2940,6 @@ with st.sidebar:
         "Kritik Odak Modu",
         key="critical_focus_enabled",
         help="Kritik alarm, arızalı makine ve geciken işleri her sayfanın üstünde öne çıkarır."
-    )
-    st.toggle(
-        "Toplu İşlem Modu",
-        key="bulk_action_enabled",
-        help="Alarm ve iş emirlerinde birden fazla kaydı aynı anda günceller."
     )
     undo_action = pending_undo_action()
     if undo_action:
@@ -3064,6 +3008,37 @@ with st.sidebar:
             key="global_date_range",
             help="Zaman serisi, alarm ve üretim görünümlerinde kullanılacak tarih aralığı."
         )
+    st.markdown("""
+    <style>
+    /* Akıllı Eşik formu açık renkli olduğundan genel beyaz sidebar yazı
+       kuralını burada geçersiz kıl ve tüm alanlarda güçlü kontrast sağla. */
+    section[data-testid="stSidebar"] div[data-testid="stForm"] {
+        background:#f7fcf9 !important;border:1px solid #b9ddc7 !important;
+        border-radius:12px !important;padding:14px !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stForm"] label,
+    section[data-testid="stSidebar"] div[data-testid="stForm"] label p,
+    section[data-testid="stSidebar"] div[data-testid="stForm"] [data-testid="stWidgetLabel"] p {
+        color:#123f2d !important;-webkit-text-fill-color:#123f2d !important;
+        opacity:1 !important;font-weight:750 !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stForm"] input {
+        color:#123f2d !important;-webkit-text-fill-color:#123f2d !important;
+        background:#edf8f1 !important;opacity:1 !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stForm"] div[data-baseweb="select"] > div {
+        background:#e8f5ed !important;border-color:#9dccaf !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stForm"] div[data-baseweb="select"] span,
+    section[data-testid="stSidebar"] div[data-testid="stForm"] div[data-baseweb="select"] input,
+    section[data-testid="stSidebar"] div[data-testid="stForm"] div[data-baseweb="select"] svg {
+        color:#123f2d !important;-webkit-text-fill-color:#123f2d !important;fill:#123f2d !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stForm"] button[kind="primary"] {
+        color:#fff !important;-webkit-text-fill-color:#fff !important;background:#129b50 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     current_thresholds = get_sensor_thresholds()
     with st.expander("Akıllı Eşik Ayarları", expanded=False):
         st.caption("Bu değerler sensör durumunu, alarm üretimini ve Kayıp Avcısı önerilerini doğrudan etkiler.")
