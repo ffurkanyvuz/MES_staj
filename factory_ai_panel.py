@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import unicodedata
+from difflib import get_close_matches
 from datetime import date, datetime
 
 import pandas as pd
@@ -331,8 +334,10 @@ def _extract_text(response):
 
 def _ask_openai(api_key, model, question, history, tools):
     instructions = """Sen TREX MES Fabrika Asistanısın. Yalnızca verilen MES araçlarının döndürdüğü verilere dayan.
-Türkçe, yönetici odaklı ve net cevap ver. Önce sonucu söyle; sonra Kanıt, Olası neden ve Önerilen aksiyon başlıklarını kullan.
-Sayıları ve makine kodlarını belirt. Veri yoksa açıkça söyle, tahmin uydurma. En fazla 350 kelime yaz.
+Kullanıcı gündelik Türkçe, kısa cümle, yazım hatası veya 'bu/peki/ona' gibi önceki mesaja gönderme kullanabilir; niyetini konuşma bağlamından çıkar.
+Samimi ama profesyonel konuş. Aynı kalıp özeti tekrarlama; doğrudan sorulan konuya cevap ver. Basit selamlaşmada araç çağırman gerekmez.
+Veriye dayalı soruda uygun aracı seç; belirli makine sorulursa get_machine_analysis kullan. Sonucu önce tek cümlede söyle, ardından yalnızca yararlı kanıt ve uygulanabilir öneriyi ver.
+Sayıları ve makine kodlarını belirt. Veri yoksa açıkça söyle, tahmin uydurma. En fazla 280 kelime yaz.
 Sistem salt okunurdur: işlem yaptığını söyleme; gerekiyorsa kullanıcıyı ilgili MES modülüne yönlendir."""
     conversation = []
     for item in history[-6:]:
@@ -374,38 +379,172 @@ Sistem salt okunurdur: işlem yaptığını söyleme; gerekiyorsa kullanıcıyı
     return _extract_text(data) or "Analiz araç sınırına ulaştı; sorunuzu biraz daraltın.", used
 
 
-def _local_answer(question, tools):
-    text = question.casefold()
-    used = ["get_factory_summary"]
-    summary = tools.factory_summary()
-    lines = [
-        f"**Yönetici özeti:** Üretim {summary['production']:,}/{summary['target']:,} adet ve hedef gerçekleşme %{summary['target_attainment_pct']:.1f}. Ortalama OEE %{summary['average_oee_pct']:.1f}.",
-        f"**Kritik görünüm:** {sum(summary['open_alarms'].values())} açık alarm, {summary['late_work_orders']} geciken iş emri, {summary['overdue_maintenance']} geciken bakım ve {summary['overdue_actions']} geciken aksiyon var.",
-    ]
+def _normalise(text):
+    value = str(text).casefold().translate(str.maketrans({"ı": "i", "İ": "i"}))
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9%]+", " ", value).strip()
+
+
+def _extract_machine(text, machine_codes):
+    normal = _normalise(text)
+    compact = normal.replace(" ", "")
+    for code in machine_codes:
+        if _normalise(code).replace(" ", "") in compact:
+            return code
+    match = re.search(r"(?:cnc|makine|makina|maikne|tezgah)\s*(?:no|numara)?\s*[- ]?(\d+)", normal)
+    if match:
+        number = int(match.group(1))
+        for code in machine_codes:
+            digits = re.findall(r"\d+", str(code))
+            if digits and int(digits[-1]) == number:
+                return code
+    word_numbers = {"bir": 1, "iki": 2, "uc": 3, "dort": 4, "bes": 5, "alti": 6, "yedi": 7, "sekiz": 8, "dokuz": 9}
+    for word, number in word_numbers.items():
+        if re.search(rf"\b(?:cnc|makine|makina|maikne|tezgah)\s+{word}\b", normal):
+            for code in machine_codes:
+                digits = re.findall(r"\d+", str(code))
+                if digits and int(digits[-1]) == number:
+                    return code
+    return ""
+
+
+def _detect_intent(question, has_machine=False):
+    normal = _normalise(question)
+    tokens = normal.split()
+    vocabulary = {
+        "uretim", "hedef", "performans", "oee", "makine", "tezgah", "bakim", "ariza", "risk",
+        "durus", "kayip", "bekleme", "vardiya", "aksiyon", "geciken", "kalite", "hata", "fire",
+        "alarm", "sensor", "sicaklik", "titresim", "basinc", "ozet", "durum", "bugun", "neden",
+    }
+    corrected = []
+    for token in tokens:
+        if token in vocabulary or len(token) < 4:
+            corrected.append(token)
+        else:
+            match = get_close_matches(token, vocabulary, n=1, cutoff=.72)
+            corrected.append(match[0] if match else token)
+    text = " ".join(corrected)
+    if any(phrase in text for phrase in ("selam", "merhaba", "gunaydin", "iyi aksam", "nasilsin")):
+        return "greeting"
+    if any(phrase in text for phrase in ("ne yapabilirsin", "neler yaparsin", "yardim et", "seni nasil")):
+        return "help"
+    if has_machine or any(phrase in text for phrase in ("bu neden", "bu niye", "neden dusuk", "ona bak", "detay")):
+        return "machine"
+    scores = {
+        "maintenance": sum(word in text for word in ("bakim", "ariza", "risk", "servis")),
+        "downtime": sum(word in text for word in ("durus", "kayip", "bekleme", "durdu")),
+        "quality": sum(word in text for word in ("kalite", "hata", "fire", "hatali", "saglam")),
+        "shift": sum(word in text for word in ("vardiya", "sabah", "aksam", "gece", "operator")),
+        "actions": sum(word in text for word in ("aksiyon", "geciken", "sorumlu", "termin", "gorev")),
+        "production": sum(word in text for word in ("uretim", "hedef", "performans", "oee", "verim", "geride")),
+        "factory": sum(word in text for word in ("ozet", "durum", "bugun", "fabrika", "nasil gidiyor", "sikinti", "kritik")),
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] else "factory"
+
+
+def _local_answer(question, tools, history=None):
     allowed = tools.allowed_names()
-    if ("bakım" in text or "risk" in text) and "get_maintenance_risks" in allowed:
-        used.append("get_maintenance_risks")
-        risks = tools.maintenance_risks()["risks"][:3]
-        lines.append("**Öncelikli bakım:** " + "; ".join(f"{item['machine']} · {item['risk_score']}/100 ({', '.join(item['reasons'])})" for item in risks))
-    elif ("duruş" in text or "kayıp" in text) and "get_downtime_analysis" in allowed:
-        used.append("get_downtime_analysis")
+    machine_code = _extract_machine(question, tools.machine_codes)
+    context = st.session_state.get("factory_ai_context", {})
+    normal = _normalise(question)
+    follow_up = len(normal.split()) <= 7 and any(word in normal for word in ("bu", "peki", "neden", "niye", "daha", "detay", "onda"))
+    if not machine_code and follow_up:
+        machine_code = context.get("machine", "")
+    intent = _detect_intent(question, bool(machine_code))
+    if intent == "factory" and follow_up and context.get("intent"):
+        intent = context["intent"]
+    st.session_state["factory_ai_context"] = {"intent": intent, "machine": machine_code or context.get("machine", "")}
+
+    if intent == "greeting":
+        summary = tools.factory_summary()
+        return (f"Merhaba 👋 Şu an fabrikada **{summary['production']:,}/{summary['target']:,} adet** üretim ve **%{summary['average_oee_pct']:.1f} ortalama OEE** görüyorum. "
+                "İstersen bana günlük konuşur gibi ‘hangi makine sıkıntılı?’, ‘CNC iki niye düşük?’ veya ‘bakımda ne var?’ diye sorabilirsin.", ["get_factory_summary"])
+    if intent == "help":
+        return ("Üretim hedefini, makine OEE’sini, duruş nedenlerini, bakım risklerini, kalite kayıplarını, vardiyaları ve açık aksiyonları inceleyebilirim. "
+                "Resmî cümle kurmana gerek yok; **‘bugün işler nasıl?’**, **‘CNC-03’e ne olmuş?’** ya da **‘en büyük kayıp nerede?’** demen yeterli.", [])
+
+    if intent == "machine":
+        if not machine_code:
+            return "Hangi makineye bakmamı istersin? Örneğin **CNC-01** ya da sadece **makine iki** diyebilirsin.", []
+        item = tools.machine_analysis(machine_code)
+        if item.get("error"):
+            return f"{machine_code} kodlu makineyi bulamadım. Mevcut makineler: {', '.join(tools.machine_codes)}.", ["get_machine_analysis"]
+        components = {"kullanılabilirlik": item["oee"]["availability_pct"], "performans": item["oee"]["performance_pct"], "kalite": item["oee"]["quality_pct"]}
+        weakest = min(components, key=components.get)
+        target_pct = item["production"] / item["target"] * 100 if item["target"] else 0
+        lines = [f"{machine_code}'ye baktım. Şu an **{item['status']}**, üretimi **{item['production']:,}/{item['target']:,} adet** (%{target_pct:.1f}) ve OEE’si **%{item['oee']['oee_pct']:.1f}**.",
+                 f"En zayıf tarafı **{weakest} (%{components[weakest]:.1f})**. Kullanılabilirlik %{item['oee']['availability_pct']:.1f}, performans %{item['oee']['performance_pct']:.1f}, kalite %{item['oee']['quality_pct']:.1f}."]
+        if item["active_alarms"]:
+            alarm = item["active_alarms"][0]
+            lines.append(f"Ayrıca açık **{alarm.get('level', '')}** alarmı var: {alarm.get('alarm', '')}.")
+        if item["recent_downtime"]:
+            minutes = sum(_number(stop.get("duration")) for stop in item["recent_downtime"])
+            main_reason = max(item["recent_downtime"], key=lambda stop: _number(stop.get("duration"))).get("reason", "Kayıt yok")
+            lines.append(f"Son kayıtlarda **{minutes:.0f} dakika** duruş görünüyor; en büyük neden **{main_reason}**.")
+        lines.append(f"Ben olsam önce **{weakest} kaybını** ve açık alarmı doğrular, ardından Makine Detayı ekranından vardiya aksiyonu açardım.")
+        return "\n\n".join(lines), ["get_machine_analysis"]
+
+    if intent == "maintenance" and "get_maintenance_risks" in allowed:
+        risks = tools.maintenance_risks()["risks"]
+        risky = [item for item in risks if item["risk_score"] > 0]
+        if not risky:
+            return "Şu an belirgin bir bakım riski görünmüyor. Bakım tarihleri, sensörler ve açık alarmlar normal aralıkta.", ["get_maintenance_risks"]
+        lead = risky[0]
+        details = "\n".join(f"- **{item['machine']} · {item['risk_score']}/100:** {', '.join(item['reasons'])}" for item in risky[:4])
+        return f"Bakım tarafında ilk bakacağım makine **{lead['machine']}** olur. Risk puanı **{lead['risk_score']}/100**.\n\n{details}\n\nÖnce en yüksek riskli makine için bakım talebi ve sorumlu ataması açılmalı.", ["get_maintenance_risks"]
+
+    if intent == "downtime" and "get_downtime_analysis" in allowed:
         stop = tools.downtime_analysis()
-        reasons = "; ".join(f"{item['reason']}: {item['minutes']:.0f} dk" for item in stop["by_reason"][:3])
-        lines.append(f"**Duruş odağı:** Toplam {stop['total_minutes']:.0f} dk. {reasons or 'Neden kaydı bulunamadı.'}")
-    elif "vardiya" in text and "compare_shifts" in allowed:
-        used.append("compare_shifts")
+        reasons = stop["by_reason"][:4]
+        if not reasons:
+            return "Kayıtlı duruş bulamadım; bu nedenle güvenilir bir kayıp sıralaması yapamıyorum.", ["get_downtime_analysis"]
+        detail = "\n".join(f"- **{item['reason']}**: {item['minutes']:.0f} dk / {item['count']} olay" for item in reasons)
+        top = reasons[0]
+        return f"Toplam **{stop['total_minutes']:.0f} dakika** kayıtlı duruş var. En büyük kayıp **{top['reason']} ({top['minutes']:.0f} dk)**.\n\n{detail}\n\nİlk iyileştirme çalışmasını en yüksek süreli nedene açmak en fazla geri dönüşü sağlar.", ["get_downtime_analysis"]
+
+    if intent == "quality" and "get_quality_summary" in allowed:
+        quality = tools.quality_summary()
+        defects = quality.get("defects", [])
+        detail = "\n".join(f"- **{item['reason']}**: {item['count']} adet" for item in defects[:4]) or "- Hata türü kaydı yok."
+        return f"Kalite oranı **%{quality['quality_pct']:.1f}**; son kayıtlarda **{quality['defective']} hatalı ürün** var.\n\n{detail}\n\nÖnce en sık hata türü için 5 Why açıp ilgili makine ve vardiyayla ilişkilendirmek gerekir.", ["get_quality_summary"]
+
+    if intent == "shift" and "compare_shifts" in allowed:
         shifts = tools.compare_shifts()["shifts"]
-        lines.append("**Vardiyalar:** " + "; ".join(f"{item['shift']} %{item['attainment_pct']:.1f} hedef, %{item['average_oee_pct']:.1f} OEE" for item in shifts))
-    elif "aksiyon" in text or "gecik" in text:
-        used.append("get_open_actions")
+        if not shifts:
+            return "Karşılaştırabileceğim vardiya ataması bulunmuyor.", ["compare_shifts"]
+        ranked = sorted(shifts, key=lambda item: item["attainment_pct"], reverse=True)
+        detail = "\n".join(f"- **{item['shift']}**: hedef %{item['attainment_pct']:.1f}, OEE %{item['average_oee_pct']:.1f}, {item['production']:,} adet" for item in ranked)
+        return f"Şu an hedef gerçekleşmesinde **{ranked[0]['shift']} vardiyası** önde.\n\n{detail}\n\nNot: Bu karşılaştırma makinelerin mevcut vardiya ataması ve anlık sayaçlarına dayanıyor.", ["compare_shifts"]
+
+    if intent == "actions":
         actions = tools.open_actions()
-        lines.append(f"**Aksiyon yükü:** {actions['open_count']} açık, {actions['overdue_count']} gecikmiş aksiyon; tahmini kayıp {actions['estimated_loss']:.1f}.")
-    else:
-        weak = sorted(summary["machines"], key=lambda item: item["oee_pct"])[:2]
-        lines.append("**Öncelik:** " + "; ".join(f"{item['machine']} OEE %{item['oee_pct']:.1f}, hedef %{(item['production']/item['target']*100 if item['target'] else 0):.1f}" for item in weak))
-    lines.append("**Önerilen aksiyon:** En düşük OEE'li makineyi, açık alarmı ve geciken aksiyonu aynı toplantı gündeminde doğrulayın.")
-    lines.append("\n*Yapay zekâ anahtarı tanımlanmadığı için bu yanıt yerel MES analiz motoruyla üretildi.*")
-    return "\n\n".join(lines), used
+        rows = actions.get("actions", [])
+        detail = "\n".join(f"- **{item.get('priority', '')} · {item.get('title', '')}** — {item.get('owner_name') or 'Sorumlu yok'}, termin {item.get('due_at') or 'yok'}" for item in rows[:5]) or "- Açık aksiyon bulunmuyor."
+        return f"Toplam **{actions['open_count']} açık**, **{actions['overdue_count']} gecikmiş** aksiyon var. Tahmini toplam kayıp **{actions['estimated_loss']:.1f}**.\n\n{detail}\n\nGeciken ve sorumlusu olmayan kayıtları önce ele almak gerekir.", ["get_open_actions"]
+
+    if intent == "production" and "get_production_performance" in allowed:
+        production = tools.production_performance()["machines"]
+        ranked = sorted(production, key=lambda item: (item["attainment_pct"], item["oee_pct"]))
+        detail = "\n".join(f"- **{item['machine']}**: hedef %{item['attainment_pct']:.1f}, OEE %{item['oee_pct']:.1f}, kayıp odağı {item['largest_oee_loss']}" for item in ranked)
+        weak = ranked[0] if ranked else None
+        if not weak:
+            return "Üretim performansı için makine verisi bulamadım.", ["get_production_performance"]
+        st.session_state["factory_ai_context"]["machine"] = weak["machine"]
+        return f"Üretimde en fazla dikkat isteyen makine **{weak['machine']}**. Hedefi %{weak['attainment_pct']:.1f}, OEE’si %{weak['oee_pct']:.1f}.\n\n{detail}\n\n‘Peki neden?’ dersen bu makinenin alarm, duruş ve sensör detayına inerim.", ["get_production_performance"]
+
+    summary = tools.factory_summary()
+    weak = sorted(summary["machines"], key=lambda item: item["oee_pct"])[0] if summary["machines"] else None
+    if weak:
+        st.session_state["factory_ai_context"]["machine"] = weak["machine"]
+    issue_count = sum(summary["open_alarms"].values()) + summary["late_work_orders"] + summary["overdue_maintenance"] + summary["overdue_actions"]
+    tone = "Genel tablo sakin görünüyor" if issue_count == 0 else f"Bugün takip edilmesi gereken **{issue_count} konu** var"
+    answer = f"{tone}. Üretim **{summary['production']:,}/{summary['target']:,} adet** (%{summary['target_attainment_pct']:.1f}), ortalama OEE **%{summary['average_oee_pct']:.1f}**. "
+    if weak:
+        answer += f"İlk bakacağım yer **{weak['machine']}**; OEE’si %{weak['oee_pct']:.1f}. "
+    answer += f"Açık alarm {sum(summary['open_alarms'].values())}, geciken iş emri {summary['late_work_orders']}, geciken bakım {summary['overdue_maintenance']}. İstersen bunlardan birine birlikte inelim."
+    return answer, ["get_factory_summary"]
 
 
 def _management_snapshot(tools, summary):
@@ -464,64 +603,65 @@ def _brief_markdown(summary, priorities, current_name):
 
 def _render_chat_tab(tools, summary, api_key, model, current_role):
     connected = bool(api_key)
-    left, right = st.columns([2.25, 1], gap="large")
-    with right:
-        st.markdown("#### Bugünün İçgörüsü")
-        risk_machine = min(summary["machines"], key=lambda item: item["oee_pct"], default=None)
-        if risk_machine:
-            st.markdown(f"""<div class="trex-insight"><small>ÖNCELİKLİ MAKİNE</small><strong>{risk_machine['machine']} · %{risk_machine['oee_pct']:.1f} OEE</strong><p>{risk_machine['status']} · {risk_machine['production']:,}/{risk_machine['target']:,} adet. OEE kaybının bileşenlerini inceleyin.</p></div>""", unsafe_allow_html=True)
-        st.markdown(f"""<div class="trex-insight"><small>OPERASYON NABZI</small><strong>%{summary['target_attainment_pct']:.1f} hedef</strong><p>{sum(summary['open_alarms'].values())} açık alarm · {summary['overdue_actions']} geciken aksiyon · {summary['overdue_maintenance']} geciken bakım</p></div>""", unsafe_allow_html=True)
-        st.caption(f"Son analiz: {summary['as_of']}")
-        with st.expander("Asistan erişimi"):
-            st.write("Bu rolde kullanılabilen veri kaynakları:")
-            for name in sorted(tools.allowed_names()):
-                st.caption(f"• {TOOL_LABELS[name]}")
-            if not connected and current_role == "admin":
-                st.info("Tam yapay zekâ yanıtları için Streamlit Secrets içine `OPENAI_API_KEY` ekleyin. İsteğe bağlı model: `OPENAI_MODEL`.")
+    mode = f"OpenAI · {model}" if connected else "Yerel akıllı analiz"
+    head_left, head_right = st.columns([5, 1])
+    with head_left:
+        st.markdown(f"""<div class="trex-chat-head"><div class="trex-chat-orb">AI</div><div><strong>Fabrika hakkında bana sor</strong><p>Normal konuşabilirsin; kısa cümleleri, yazım hatalarını ve devam sorularını anlarım.</p></div><span>{mode}</span></div>""", unsafe_allow_html=True)
+    with head_right:
+        if st.button("Sohbeti temizle", key="clear_factory_chat", use_container_width=True):
+            st.session_state.pop("factory_ai_messages", None)
+            st.session_state.pop("factory_ai_context", None)
+            st.rerun()
 
-    with left:
-        st.markdown("#### Ne bilmek istiyorsunuz?")
-        quick_questions = ["Bugünün kritik durumlarını özetle", "En düşük OEE hangi makinede, neden?", "Geciken aksiyonları analiz et", "Yönetim toplantısı için kısa özet hazırla"]
-        if "get_maintenance_risks" in tools.allowed_names():
-            quick_questions.append("Bakım riski olan makineleri sırala")
-        if "compare_shifts" in tools.allowed_names():
-            quick_questions.append("Vardiyaları karşılaştır")
-        if "get_quality_summary" in tools.allowed_names():
-            quick_questions.append("En önemli kalite kaybını açıkla")
-        button_cols = st.columns(3)
-        selected_prompt = ""
-        for index, question in enumerate(quick_questions):
-            if button_cols[index % 3].button(question, key=f"ai_quick_{index}", use_container_width=True):
-                selected_prompt = question
+    quick_questions = ["Bugün işler nasıl?", "Hangi makineye bakmalıyız?", "Geciken iş var mı?", "En büyük kayıp ne?"]
+    if "get_maintenance_risks" in tools.allowed_names():
+        quick_questions.append("Bakımda sıkıntı var mı?")
+    if "compare_shifts" in tools.allowed_names():
+        quick_questions.append("Hangi vardiya daha iyi?")
+    if "get_quality_summary" in tools.allowed_names():
+        quick_questions.append("Kalitede ne sorun var?")
+    button_cols = st.columns(min(4, len(quick_questions)))
+    selected_prompt = ""
+    for index, question in enumerate(quick_questions):
+        if button_cols[index % len(button_cols)].button(question, key=f"ai_quick_{index}", use_container_width=True):
+            selected_prompt = question
 
-        if "factory_ai_messages" not in st.session_state:
-            st.session_state["factory_ai_messages"] = [{"role": "assistant", "content": "Merhaba. Fabrikadaki üretim, OEE, duruş, bakım, kalite ve aksiyon verilerini inceleyebilirim. Bir yönetici sorusu sorun."}]
-        messages = st.session_state["factory_ai_messages"]
-        for message in messages[-8:]:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if message.get("sources"):
-                    st.markdown("".join(f'<span class="trex-ai-source">{TOOL_LABELS.get(source, source)}</span>' for source in message["sources"]), unsafe_allow_html=True)
+    if "factory_ai_messages" not in st.session_state:
+        st.session_state["factory_ai_messages"] = [{"role": "assistant", "content": "Merhaba 👋 Fabrikayı seninle birlikte inceleyebilirim. Resmî cümle kurmana gerek yok; mesela **‘CNC ikiye ne olmuş?’** ya da **‘bugün nerede sıkıntı var?’** diyebilirsin."}]
+    messages = st.session_state["factory_ai_messages"]
+    st.markdown('<div class="trex-chat-divider"><span>CANLI MES SOHBETİ</span></div>', unsafe_allow_html=True)
+    for message in messages[-10:]:
+        avatar = "🦖" if message["role"] == "assistant" else "👤"
+        with st.chat_message(message["role"], avatar=avatar):
+            st.markdown(message["content"])
+            if message.get("sources"):
+                st.markdown("".join(f'<span class="trex-ai-source">{TOOL_LABELS.get(source, source)}</span>' for source in message["sources"]), unsafe_allow_html=True)
 
-        typed_prompt = st.chat_input("Örn. CNC-02 neden hedefin gerisinde?")
-        prompt = selected_prompt or typed_prompt
-        if prompt:
-            history = [item for item in messages if item["role"] in ("user", "assistant")]
-            messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            with st.chat_message("assistant"):
-                with st.spinner("MES verileri inceleniyor..."):
-                    try:
-                        answer, sources = _ask_openai(api_key, model, prompt, history, tools) if connected else _local_answer(prompt, tools)
-                    except Exception as exc:
-                        answer, sources = _local_answer(prompt, tools)
-                        if current_role == "admin":
-                            st.warning(f"Yapay zekâ servisine erişilemedi; yerel analiz gösterildi. {str(exc)[:160]}")
-                st.markdown(answer)
+    typed_prompt = st.chat_input("Normal konuşabilirsin: ‘CNC iki niye düşük?’")
+    prompt = selected_prompt or typed_prompt
+    if prompt:
+        history = [item for item in messages if item["role"] in ("user", "assistant")]
+        messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt)
+        with st.chat_message("assistant", avatar="🦖"):
+            with st.spinner("MES kayıtlarına bakıyorum..."):
+                try:
+                    answer, sources = _ask_openai(api_key, model, prompt, history, tools) if connected else _local_answer(prompt, tools, history)
+                except Exception as exc:
+                    answer, sources = _local_answer(prompt, tools, history)
+                    if current_role == "admin":
+                        st.warning(f"Yapay zekâ servisine erişilemedi; yerel analiz gösterildi. {str(exc)[:160]}")
+            st.markdown(answer)
+            if sources:
                 st.markdown("".join(f'<span class="trex-ai-source">{TOOL_LABELS.get(source, source)}</span>' for source in dict.fromkeys(sources)), unsafe_allow_html=True)
-            messages.append({"role": "assistant", "content": answer, "sources": list(dict.fromkeys(sources))})
-            st.session_state["factory_ai_messages"] = messages[-12:]
+        messages.append({"role": "assistant", "content": answer, "sources": list(dict.fromkeys(sources))})
+        st.session_state["factory_ai_messages"] = messages[-16:]
+
+    footer_cols = st.columns([3, 1])
+    footer_cols[0].caption(f"Veri anı: {summary['as_of']} · Yanıtlar yalnızca yetkili MES verilerine dayanır.")
+    if not connected and current_role == "admin":
+        footer_cols[1].caption("OpenAI anahtarı bekleniyor")
 
 
 def _render_briefing_tab(summary, priorities, current_name):
@@ -577,10 +717,11 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
       .trex-insight{border:1px solid #d5e8df;border-radius:13px;background:linear-gradient(145deg,#fff,#f3fbf7);padding:15px;margin-bottom:10px;min-height:112px}
       .trex-insight small{color:#648174;font-weight:750}.trex-insight strong{display:block;color:#07553b;font-size:22px;margin:6px 0}.trex-insight p{font-size:11px;color:#48685a;margin:0}
       .trex-ai-source{display:inline-block;background:#e8f7ef;color:#08754f;border-radius:12px;padding:3px 8px;margin:2px;font-size:9px;font-weight:750}
+      .trex-chat-head{display:flex;align-items:center;gap:12px;border:1px solid #d5e9df;background:linear-gradient(120deg,#f8fdfa,#eef9f4);border-radius:14px;padding:13px 15px;margin:10px 0 8px}.trex-chat-orb{width:39px;height:39px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#087c55,#14ad70);color:white;font-weight:900;box-shadow:0 5px 14px rgba(8,124,85,.2)}.trex-chat-head>div:nth-child(2){flex:1}.trex-chat-head strong{display:block;color:#084d37;font-size:14px}.trex-chat-head p{margin:2px 0 0;color:#668075;font-size:10px}.trex-chat-head>span{background:#daf3e6;color:#08764f;border-radius:14px;padding:5px 9px;font-size:9px;font-weight:800;white-space:nowrap}.trex-chat-divider{display:flex;align-items:center;gap:10px;color:#789085;font-size:8px;font-weight:850;letter-spacing:.12em;margin:14px 0 8px}.trex-chat-divider:before,.trex-chat-divider:after{content:"";height:1px;background:#deebe5;flex:1}
       .trex-ai-kpi{border:1px solid #d8e9e0;border-radius:12px;background:#fff;padding:11px 13px;min-height:82px}.trex-ai-kpi small{font-size:9px;font-weight:800;color:#617b6f;letter-spacing:.04em}.trex-ai-kpi strong{display:block;color:#07543a;font-size:21px;line-height:30px}.trex-ai-kpi span{font-size:10px;color:#6a8377}
       .trex-priority{display:grid;grid-template-columns:30px 1fr 42px;gap:10px;align-items:center;border:1px solid #dcebe4;border-left:4px solid var(--priority);border-radius:11px;padding:10px 12px;margin:8px 0;background:#fff}.trex-priority-rank{width:27px;height:27px;border-radius:50%;display:grid;place-items:center;background:#eef8f3;color:#07543a;font-weight:850}.trex-priority small{font-size:8px;color:#6a8377;font-weight:800}.trex-priority strong{display:block;color:#113f30;font-size:12px;margin:2px 0}.trex-priority p{font-size:10px;color:#5c7469;margin:0}.trex-priority>b{color:var(--priority);font-size:17px;text-align:right}
       .trex-confidence{background:linear-gradient(135deg,#063f2e,#0d9664);border-radius:14px;padding:18px;color:white;margin-bottom:14px}.trex-confidence small{font-size:9px;color:#ccebdd;font-weight:800}.trex-confidence strong{display:block;font-size:34px}.trex-confidence p{font-size:11px;color:#d9f3e7;margin:0}
-      [data-testid="stChatMessage"]{border:1px solid #dfebe5;border-radius:13px;padding:5px 10px;background:rgba(255,255,255,.75)}
+      [data-testid="stChatMessage"]{border:0;border-radius:14px;padding:8px 12px;margin:5px 0;background:#f5faf7;box-shadow:none}[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]){background:#eef8f3;margin-left:12%}[data-testid="stChatInput"]{border:1px solid #bddfce;border-radius:15px;box-shadow:0 7px 22px rgba(8,92,61,.08)}
     </style>
     """, unsafe_allow_html=True)
     mode_label = f"OpenAI · {model}" if connected else "Yerel analiz modu"
