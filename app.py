@@ -440,6 +440,53 @@ def ensure_five_why_schema(database_identity, schema_version="five-why-v1"):
     return True
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_action_center_schema(database_identity, schema_version="action-center-v1"):
+    """Modüller arası aksiyon ve vardiya devir teslim kayıtlarını kurar."""
+    connection = conn()
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS operational_actions(
+            id INTEGER PRIMARY KEY,
+            action_no TEXT UNIQUE NOT NULL,
+            source_key TEXT UNIQUE NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id INTEGER,
+            machine_code TEXT,
+            title TEXT NOT NULL,
+            description TEXT,
+            priority TEXT NOT NULL,
+            status TEXT NOT NULL,
+            owner_username TEXT,
+            owner_name TEXT,
+            due_at TEXT,
+            estimated_loss REAL DEFAULT 0,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            verification_note TEXT
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS shift_handover_notes(
+            id INTEGER PRIMARY KEY,
+            from_shift TEXT NOT NULL,
+            to_shift TEXT NOT NULL,
+            note TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            acknowledged_by TEXT,
+            acknowledged_at TEXT
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_actions_status_due ON operational_actions(status,due_at)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_actions_owner ON operational_actions(owner_username,status)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_actions_machine ON operational_actions(machine_code)")
+    connection.commit()
+    connection.close()
+    return True
+
+
 def get_sensor_thresholds():
     values = DEFAULT_SENSOR_THRESHOLDS.copy()
     try:
@@ -1149,9 +1196,9 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz"},
-    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz"},
-    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🎯 Aksiyon Merkezi"},
+    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🎯 Aksiyon Merkezi"},
+    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🎯 Aksiyon Merkezi"},
 }
 
 NAV_LABELS = {
@@ -1162,7 +1209,7 @@ NAV_LABELS = {
     "📦 Stok": "Stok", "🔎 Detay": "Makine Detayı", "📄 Raporlar": "Raporlar",
     "📺 Andon Ekranı": "Andon Panosu", "🔳 QR Makine": "QR Makine", "📜 Denetim Kaydı": "Denetim ve Yedekleme",
     "👥 Kullanıcı Yönetimi": "Kullanıcı ve Yetki", "📊 Veritabanı": "Veri ve Raporlama",
-    "🧠 Akıllı Analiz": "Akıllı Analiz", "👥 OLE": "İşgücü OLE", "🌐 Dijital Olgunluk": "Dijital Olgunluk",
+    "🧠 Akıllı Analiz": "Akıllı Analiz", "🎯 Aksiyon Merkezi": "Aksiyon Merkezi", "👥 OLE": "İşgücü OLE", "🌐 Dijital Olgunluk": "Dijital Olgunluk",
 }
 
 
@@ -1726,6 +1773,7 @@ ensure_notification_schema(notification_database_identity)
 ensure_spc_schema(notification_database_identity)
 ensure_maturity_schema(notification_database_identity)
 ensure_five_why_schema(notification_database_identity)
+ensure_action_center_schema(notification_database_identity)
 
 
 # =========================================================
@@ -2755,6 +2803,7 @@ module_page_info = {
     "📜 Denetim Kaydı": ("Denetim Kaydı", "Kullanıcı işlemleri ve yedekleme kayıtları"),
     "👥 Kullanıcı Yönetimi": ("Kullanıcı Yönetimi", "Admin için rol ve kullanıcı durumu düzenleme"),
     "🧠 Akıllı Analiz": ("Akıllı Analiz", "Üretim, OEE ve bakım riskleri için karar desteği"),
+    "🎯 Aksiyon Merkezi": ("Operasyon Aksiyon Merkezi", "Problemleri sorumlu, termin ve doğrulama ile sonuçlandırın"),
     "👥 OLE": ("İşgücü OLE", "Operatör ve vardiya bazında tahmini işgücü etkinliği"),
     "🌐 Dijital Olgunluk": ("Dijital Fabrika Olgunluğu", "Dokuz kategoride açıklanabilir dijital dönüşüm skoru"),
 }
@@ -3135,7 +3184,7 @@ with st.sidebar:
         "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE"],
         "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
         "KALİTE VE BAKIM": ["✅ Kalite", "🔧 Bakım", "📦 Stok"],
-        "YÖNETİM": ["🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
+        "YÖNETİM": ["🎯 Aksiyon Merkezi", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
     }
     if "selected_module" not in st.session_state:
         st.session_state["selected_module"] = "🏠 Ana Sayfa"
@@ -5895,6 +5944,18 @@ if selected_module == "📦 Stok":
 
     if st.session_state.get("stock_new_open", False):
         stock_movement_dialog()
+
+
+if selected_module == "🎯 Aksiyon Merkezi":
+    from action_center_panel import render_action_center
+    render_action_center(
+        q,
+        execute,
+        current_username=st.session_state.get("username", ""),
+        current_name=st.session_state.get("full_name", ""),
+        current_role=st.session_state.get("role", "operator"),
+        notifier=create_notification,
+    )
 
 
 if selected_module == "🧠 Akıllı Analiz":
