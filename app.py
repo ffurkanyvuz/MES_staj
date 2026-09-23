@@ -1196,9 +1196,9 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🎯 Aksiyon Merkezi"},
-    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🎯 Aksiyon Merkezi"},
-    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🎯 Aksiyon Merkezi"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
+    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
+    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
 }
 
 NAV_LABELS = {
@@ -1209,7 +1209,7 @@ NAV_LABELS = {
     "📦 Stok": "Stok", "🔎 Detay": "Makine Detayı", "📄 Raporlar": "Raporlar",
     "📺 Andon Ekranı": "Andon Panosu", "🔳 QR Makine": "QR Makine", "📜 Denetim Kaydı": "Denetim ve Yedekleme",
     "👥 Kullanıcı Yönetimi": "Kullanıcı ve Yetki", "📊 Veritabanı": "Veri ve Raporlama",
-    "🧠 Akıllı Analiz": "Akıllı Analiz", "🎯 Aksiyon Merkezi": "Aksiyon Merkezi", "👥 OLE": "İşgücü OLE", "🌐 Dijital Olgunluk": "Dijital Olgunluk",
+    "🧠 Akıllı Analiz": "Akıllı Analiz", "🤖 Fabrika Asistanı": "Fabrika Asistanı", "🎯 Aksiyon Merkezi": "Aksiyon Merkezi", "👥 OLE": "İşgücü OLE", "🌐 Dijital Olgunluk": "Dijital Olgunluk",
 }
 
 
@@ -2803,6 +2803,7 @@ module_page_info = {
     "📜 Denetim Kaydı": ("Denetim Kaydı", "Kullanıcı işlemleri ve yedekleme kayıtları"),
     "👥 Kullanıcı Yönetimi": ("Kullanıcı Yönetimi", "Admin için rol ve kullanıcı durumu düzenleme"),
     "🧠 Akıllı Analiz": ("Akıllı Analiz", "Üretim, OEE ve bakım riskleri için karar desteği"),
+    "🤖 Fabrika Asistanı": ("Fabrika Asistanı", "MES verileriyle konuşan yapay zekâ destekli üretim danışmanı"),
     "🎯 Aksiyon Merkezi": ("Operasyon Aksiyon Merkezi", "Problemleri sorumlu, termin ve doğrulama ile sonuçlandırın"),
     "👥 OLE": ("İşgücü OLE", "Operatör ve vardiya bazında tahmini işgücü etkinliği"),
     "🌐 Dijital Olgunluk": ("Dijital Fabrika Olgunluğu", "Dokuz kategoride açıklanabilir dijital dönüşüm skoru"),
@@ -3184,7 +3185,7 @@ with st.sidebar:
         "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE"],
         "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
         "KALİTE VE BAKIM": ["✅ Kalite", "🔧 Bakım", "📦 Stok"],
-        "YÖNETİM": ["🎯 Aksiyon Merkezi", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
+        "YÖNETİM": ["🎯 Aksiyon Merkezi", "🤖 Fabrika Asistanı", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
     }
     if "selected_module" not in st.session_state:
         st.session_state["selected_module"] = "🏠 Ana Sayfa"
@@ -5966,6 +5967,16 @@ if selected_module == "🧠 Akıllı Analiz":
         current_user=st.session_state.get("full_name") or st.session_state.get("username", ""),
         can_manage=has_role("admin", "maintenance", "quality"),
         notifier=create_notification,
+    )
+
+
+if selected_module == "🤖 Fabrika Asistanı":
+    from factory_ai_panel import render_factory_ai
+    render_factory_ai(
+        q,
+        current_username=st.session_state.get("username", ""),
+        current_name=st.session_state.get("full_name", ""),
+        current_role=st.session_state.get("role", "operator"),
     )
 
 
