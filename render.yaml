@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: trex-mes-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: TREX_API_KEY
+        generateValue: true
+      - key: API_CORS_ORIGINS
+        sync: false
+
