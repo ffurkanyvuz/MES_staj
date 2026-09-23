@@ -2,19 +2,86 @@ import random
 import sqlite3
 import statistics
 import uuid
-from datetime import datetime
+import os
+import hmac
+from datetime import datetime, timedelta
+from pathlib import Path
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
 
 DB = "mes.db"
 
+
+def runtime_setting(name, default=""):
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    secrets_path = Path(__file__).with_name(".streamlit") / "secrets.toml"
+    if tomllib and secrets_path.exists():
+        try:
+            with secrets_path.open("rb") as secrets_file:
+                return str(tomllib.load(secrets_file).get(name, default)).strip()
+        except Exception:
+            pass
+    return default
+
+
+DATABASE_URL = runtime_setting("DATABASE_URL")
+TREX_API_KEY = runtime_setting("TREX_API_KEY")
+API_CORS_ORIGINS = [item.strip() for item in runtime_setting("API_CORS_ORIGINS", "*").split(",") if item.strip()]
+
+
+def _postgres_sql(sql):
+    return "%s".join(part.replace("%", "%%") for part in sql.split("?"))
+
+
+class PostgresConnection:
+    def __init__(self):
+        if psycopg is None:
+            raise RuntimeError("PostgreSQL için psycopg kurulu değil.")
+        self.connection = psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=False, connect_timeout=10)
+
+    def execute(self, sql, params=()):
+        return self.connection.execute(_postgres_sql(sql) if params else sql, params)
+
+    def commit(self):
+        self.connection.commit()
+
+    def close(self):
+        self.connection.close()
+
 app = FastAPI(
     title="TREX MES API",
-    version="1.0"
+    version="2.0.0",
+    description="TREX MES için Neon/SQLite uyumlu üretim veri servisi.",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=API_CORS_ORIGINS or ["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 
 def conn():
+    if DATABASE_URL:
+        return PostgresConnection()
     c = sqlite3.connect(
         DB,
         check_same_thread=False
@@ -29,70 +96,112 @@ def now():
     )
 
 
+def require_api_key(x_api_key: str | None = Header(default=None)):
+    """TREX_API_KEY ayarlıysa veri uçlarını anahtarla korur."""
+    if TREX_API_KEY and not (x_api_key and hmac.compare_digest(x_api_key, TREX_API_KEY)):
+        raise HTTPException(status_code=401, detail="Geçerli X-API-Key başlığı gerekli.")
+
+
+def rows(sql, params=()):
+    connection = conn()
+    try:
+        return [dict(item) for item in connection.execute(sql, params).fetchall()]
+    finally:
+        connection.close()
+
+
+def scalar(sql, params=(), default=0):
+    result = rows(sql, params)
+    if not result:
+        return default
+    return next(iter(result[0].values()), default)
+
+
 @app.get("/")
 def root():
     return {
         "message": "TREX MES API aktif",
-        "docs": "/docs"
+        "version": app.version,
+        "database": "Neon PostgreSQL" if DATABASE_URL else "SQLite",
+        "docs": "/docs",
+        "health": "/health",
     }
 
 
-@app.get("/machines")
+@app.get("/health", tags=["Sistem"])
+def health():
+    try:
+        scalar("SELECT 1 AS ok")
+        return {"status": "healthy", "database": "postgresql" if DATABASE_URL else "sqlite", "timestamp": now()}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Veritabanı bağlantısı başarısız: {type(exc).__name__}") from exc
+
+
+@app.get("/api/v1/summary", dependencies=[Depends(require_api_key)], tags=["Yönetim"])
+def factory_summary():
+    machines = rows("SELECT machine_code,status,production,target,downtime,defective FROM machines ORDER BY machine_code")
+    production = sum(int(item.get("production") or 0) for item in machines)
+    target = sum(int(item.get("target") or 0) for item in machines)
+    return {
+        "timestamp": now(),
+        "production": production,
+        "target": target,
+        "target_attainment_pct": round(production / target * 100, 1) if target else 0,
+        "machines": len(machines),
+        "machine_statuses": {status: sum(1 for item in machines if item.get("status") == status) for status in sorted({str(item.get("status")) for item in machines})},
+        "open_alarms": int(scalar("SELECT COUNT(*) AS total FROM alarms WHERE acknowledged=0")),
+        "open_work_orders": int(scalar("SELECT COUNT(*) AS total FROM work_orders WHERE status!='Tamamlandı'")),
+    }
+
+
+@app.get("/machines", dependencies=[Depends(require_api_key)], tags=["Makineler"])
+@app.get("/api/v1/machines", dependencies=[Depends(require_api_key)], tags=["Makineler"])
 def get_machines():
-    c = conn()
-
-    rows = c.execute("""
-        SELECT *
-        FROM machines
-        ORDER BY machine_code
-    """).fetchall()
-
-    c.close()
-
-    return [
-        dict(row)
-        for row in rows
-    ]
+    return rows("SELECT * FROM machines ORDER BY machine_code")
 
 
-@app.get("/sensors")
+@app.get("/api/v1/machines/{machine_code}", dependencies=[Depends(require_api_key)], tags=["Makineler"])
+def get_machine(machine_code: str):
+    machine = rows("SELECT * FROM machines WHERE machine_code=? LIMIT 1", (machine_code,))
+    if not machine:
+        raise HTTPException(status_code=404, detail="Makine bulunamadı.")
+    payload = machine[0]
+    payload["sensor"] = rows("SELECT temperature,vibration,pressure,rpm,timestamp FROM sensors WHERE machine_code=? LIMIT 1", (machine_code,))
+    payload["active_alarms"] = rows("SELECT id,alarm,level,time FROM alarms WHERE machine_code=? AND acknowledged=0 ORDER BY id DESC LIMIT 10", (machine_code,))
+    payload["active_work_orders"] = rows("SELECT order_no,product,target,produced,priority,status,due_date FROM work_orders WHERE machine_code=? AND status!='Tamamlandı' ORDER BY id DESC LIMIT 10", (machine_code,))
+    return payload
+
+
+@app.get("/sensors", dependencies=[Depends(require_api_key)], tags=["Canlı Veri"])
+@app.get("/api/v1/sensors", dependencies=[Depends(require_api_key)], tags=["Canlı Veri"])
 def get_sensors():
-    c = conn()
-
-    rows = c.execute("""
-        SELECT *
-        FROM sensors
-        ORDER BY machine_code
-    """).fetchall()
-
-    c.close()
-
-    return [
-        dict(row)
-        for row in rows
-    ]
+    return rows("SELECT * FROM sensors ORDER BY machine_code")
 
 
-@app.get("/alarms")
-def get_alarms():
-    c = conn()
-
-    rows = c.execute("""
-        SELECT *
-        FROM alarms
-        ORDER BY id DESC
-        LIMIT 100
-    """).fetchall()
-
-    c.close()
-
-    return [
-        dict(row)
-        for row in rows
-    ]
+@app.get("/alarms", dependencies=[Depends(require_api_key)], tags=["Operasyon"])
+@app.get("/api/v1/alarms", dependencies=[Depends(require_api_key)], tags=["Operasyon"])
+def get_alarms(active_only: bool = Query(default=False)):
+    where = "WHERE acknowledged=0" if active_only else ""
+    return rows(f"SELECT * FROM alarms {where} ORDER BY id DESC LIMIT 100")
 
 
-@app.post("/simulate")
+@app.get("/api/v1/work-orders", dependencies=[Depends(require_api_key)], tags=["Operasyon"])
+def get_work_orders(open_only: bool = Query(default=True)):
+    where = "WHERE status!='Tamamlandı'" if open_only else ""
+    return rows(f"SELECT * FROM work_orders {where} ORDER BY id DESC LIMIT 200")
+
+
+@app.get("/api/v1/actions", dependencies=[Depends(require_api_key)], tags=["Operasyon"])
+def get_actions(open_only: bool = Query(default=True)):
+    where = "WHERE status NOT IN ('Tamamlandı','Doğrulandı','İptal')" if open_only else ""
+    try:
+        return rows(f"SELECT * FROM operational_actions {where} ORDER BY id DESC LIMIT 200")
+    except Exception:
+        return []
+
+
+@app.post("/simulate", dependencies=[Depends(require_api_key)], tags=["Simülasyon"])
+@app.post("/api/v1/simulate", dependencies=[Depends(require_api_key)], tags=["Simülasyon"])
 def simulate_factory():
     c = conn()
     c.execute("""
@@ -502,10 +611,11 @@ def simulate_factory():
                     FROM alarms
                     WHERE machine_id=?
                     AND alarm=?
-                    AND time >= datetime('now','-5 minutes')
+                    AND time >= ?
                 """, (
                     machine["id"],
-                    alarm_text
+                    alarm_text,
+                    (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
                 )).fetchone()
 
                 if not recent:
