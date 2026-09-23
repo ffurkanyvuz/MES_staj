@@ -279,13 +279,6 @@ def render_maturity_panel(query, execute, *, using_postgres=False, api_configure
     for column, (label, value, note) in zip(kpis, kpi_values):
         column.markdown(f'<div class="dm-kpi"><div class="dm-kpi-label">{html.escape(label)}</div><div class="dm-kpi-value">{html.escape(value)}</div><span class="dm-kpi-note">{html.escape(note)}</span></div>', unsafe_allow_html=True)
 
-    five_why = result["five_why"]
-    capability_state = "Aktif" if five_why["analyses"] else "Henüz kullanılmadı"
-    st.markdown(f'''<div class="dm-capability"><div class="dm-cap-icon">5W</div><div class="dm-cap-main"><b>5 Why Kök Neden Analizi · {capability_state}</b><span>Sürekli İyileştirme alanı · {five_why["analyses"]} analiz, {five_why["completed"]} tamamlanan ve doğrulanan aksiyon</span></div><div class="dm-cap-score"><b>{five_why["score"]:.0f} / 100</b><span>Toplam olgunluk katkısı +{five_why["gain"]:.1f} puan</span></div></div>''', unsafe_allow_html=True)
-    if st.button("5 Why analizlerini aç", key="maturity_open_five_why", use_container_width=True):
-        st.session_state["selected_module"] = "🧠 Akıllı Analiz"
-        st.rerun()
-
     radar_col, trend_col = st.columns([1.15, 1], gap="small")
     with radar_col, st.container(border=True):
         st.markdown("#### Dijital Olgunluk Radar Haritası")
