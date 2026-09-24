@@ -3,7 +3,10 @@ $projectDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ollamaExecutable = "C:\Users\Monster\AppData\Local\Programs\Ollama\ollama.exe"
 $cloudflaredExecutable = "C:\Program Files (x86)\cloudflared\cloudflared.exe"
 $pythonExecutable = Join-Path $projectDirectory "venv\Scripts\python.exe"
-$bridgePort = 8765
+$portListener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$portListener.Start()
+$bridgePort = $portListener.LocalEndpoint.Port
+$portListener.Stop()
 
 foreach ($requiredFile in @($ollamaExecutable, $cloudflaredExecutable, $pythonExecutable)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
@@ -29,8 +32,7 @@ $bridgeProcess = Start-Process -FilePath $pythonExecutable `
     -ArgumentList "-m", "uvicorn", "ollama_bridge:app", "--host", "127.0.0.1", "--port", "$bridgePort" `
     -WorkingDirectory $projectDirectory -WindowStyle Hidden -PassThru
 
-$logFile = Join-Path $env:TEMP "trex-ollama-tunnel.log"
-if (Test-Path $logFile) { Remove-Item -LiteralPath $logFile -Force }
+$logFile = Join-Path $env:TEMP ("trex-ollama-tunnel-{0}-{1}.log" -f $PID, [guid]::NewGuid().ToString("N"))
 $tunnelProcess = Start-Process -FilePath $cloudflaredExecutable `
     -ArgumentList "tunnel", "--url", "http://127.0.0.1:$bridgePort" `
     -RedirectStandardError $logFile -WindowStyle Hidden -PassThru
@@ -63,5 +65,7 @@ try {
 finally {
     Stop-Process -Id $tunnelProcess.Id -Force -ErrorAction SilentlyContinue
     Stop-Process -Id $bridgeProcess.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 250
+    Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
 }
 
