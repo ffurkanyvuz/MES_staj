@@ -472,7 +472,7 @@ Gereksiz genel özet tekrarlama; doğrudan konuş ve en fazla 140 kelime kullan.
         "stream": False,
         # CPU üzerinde çalışan yerel modellerde bulut tünelinin zaman aşımına
         # uğramaması için bağlamı ve yanıt uzunluğunu kontrollü tutuyoruz.
-        "options": {"temperature": 0.2, "num_ctx": 4096, "num_predict": 180},
+        "options": {"temperature": 0.2, "num_ctx": 4096, "num_predict": 240},
     }
     response = requests.post(_ollama_endpoint(base_url, "chat"), headers=headers, json=payload, timeout=120)
     if not response.ok:
