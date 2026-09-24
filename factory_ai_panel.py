@@ -384,6 +384,103 @@ def _extract_text(response):
     return "\n".join(pieces).strip()
 
 
+def _ollama_endpoint(base_url, resource):
+    base = str(base_url or "").strip().rstrip("/")
+    if base.endswith("/api"):
+        return f"{base}/{resource.lstrip('/')}"
+    return f"{base}/api/{resource.lstrip('/')}"
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _ollama_available(base_url, token=""):
+    if not base_url:
+        return False, "Ollama adresi tanımlı değil"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        response = requests.get(_ollama_endpoint(base_url, "tags"), headers=headers, timeout=3)
+        if response.ok:
+            return True, "Bağlı"
+        return False, f"HTTP {response.status_code}"
+    except requests.RequestException:
+        return False, "Bilgisayar veya Ollama kapalı"
+
+
+def _ollama_context(question, tools):
+    """Soruyla ilgili MES verisini seçer; modelin SQL'e doğrudan erişmesini engeller."""
+    normal = _normalise(question)
+    machines = _extract_machines(question, tools.machine_codes)
+    machine = machines[0] if machines else ""
+    intent = "comparison" if len(machines) >= 2 or "karsilastir" in normal or "kiyasla" in normal else _detect_intent(question, bool(machine))
+    allowed = tools.allowed_names()
+    context = {"factory_summary": tools.factory_summary()}
+    sources = ["get_factory_summary"]
+
+    if intent == "comparison" and len(machines) >= 2 and "compare_machines" in allowed:
+        context["machine_comparison"] = tools.compare_machines(machines[0], machines[1])
+        sources.append("compare_machines")
+    elif intent == "machine" and machine:
+        context["machine_detail"] = tools.machine_analysis(machine)
+        sources.append("get_machine_analysis")
+    elif intent == "maintenance" and "get_maintenance_risks" in allowed:
+        context["maintenance_risks"] = tools.maintenance_risks()
+        sources.append("get_maintenance_risks")
+    elif intent == "downtime" and "get_downtime_analysis" in allowed:
+        context["downtime"] = tools.downtime_analysis()
+        sources.append("get_downtime_analysis")
+    elif intent == "quality" and "get_quality_summary" in allowed:
+        context["quality"] = tools.quality_summary()
+        sources.append("get_quality_summary")
+    elif intent == "shift" and "compare_shifts" in allowed:
+        context["shifts"] = tools.compare_shifts()
+        sources.append("compare_shifts")
+    elif intent == "actions" and "get_open_actions" in allowed:
+        context["open_actions"] = tools.open_actions()
+        sources.append("get_open_actions")
+    elif intent == "alarms" and "get_recent_alarms" in allowed:
+        day_match = re.search(r"(?:son\s*)?(\d+)\s*gun", normal)
+        days = int(day_match.group(1)) if day_match else 7
+        context["recent_alarms"] = tools.recent_alarms(days, machine)
+        sources.append("get_recent_alarms")
+    elif intent == "production" and "get_production_performance" in allowed:
+        context["production"] = tools.production_performance()
+        sources.append("get_production_performance")
+    return context, list(dict.fromkeys(sources))
+
+
+def _ask_ollama(base_url, token, model, question, history, tools):
+    context, sources = _ollama_context(question, tools)
+    system = """Sen TREX MES Fabrika Asistanısın. Türkçe, doğal ve samimi ama profesyonel konuş.
+Kullanıcının yazım hatalarını ve önceki konuşmaya yaptığı göndermeleri anlamaya çalış.
+Fabrika hakkında yalnızca MES_CONTEXT içindeki kanıtlara dayan; sayı veya olay uydurma.
+Önce sorunun net cevabını ver, sonra gerekli kanıtları ve en fazla üç uygulanabilir öneriyi yaz.
+Sistem salt okunurdur; bir işlemi gerçekten yapmış gibi konuşma. Veri yetersizse açıkça belirt.
+Gereksiz genel özet tekrarlama ve en fazla 320 kelime kullan."""
+    messages = [{"role": "system", "content": system}]
+    for item in history[-8:]:
+        if item.get("role") in ("user", "assistant") and item.get("content"):
+            messages.append({"role": item["role"], "content": str(item["content"])[:3000]})
+    messages.append({
+        "role": "user",
+        "content": f"KULLANICI_SORUSU:\n{question}\n\nMES_CONTEXT:\n{json.dumps(context, ensure_ascii=False, default=str)}",
+    })
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0.2, "num_ctx": 8192},
+    }
+    response = requests.post(_ollama_endpoint(base_url, "chat"), headers=headers, json=payload, timeout=120)
+    if not response.ok:
+        raise RuntimeError(f"Ollama bağlantısı başarısız (HTTP {response.status_code})")
+    answer = str(response.json().get("message", {}).get("content", "")).strip()
+    if not answer:
+        raise RuntimeError("Ollama boş yanıt döndürdü")
+    return answer, sources
+
+
 def _ask_openai(api_key, model, question, history, tools, previous_response_id=""):
     instructions = """Sen TREX MES Fabrika Asistanısın. Yalnızca verilen MES araçlarının döndürdüğü verilere dayan.
 Kullanıcı gündelik Türkçe, kısa cümle, yazım hatası veya 'bu/peki/ona' gibi önceki mesaja gönderme kullanabilir; niyetini konuşma bağlamından çıkar.
@@ -706,9 +803,17 @@ def _brief_markdown(summary, priorities, current_name):
     return "\n".join(lines)
 
 
-def _render_chat_tab(tools, summary, api_key, model, current_role):
-    connected = bool(api_key)
-    mode = f"OpenAI · {model}" if connected else "Yerel akıllı analiz"
+def _render_chat_tab(tools, summary, ai_config, current_role):
+    provider = ai_config["provider"]
+    connected = provider in ("ollama", "openai")
+    if provider == "ollama":
+        mode = f"Ollama · {ai_config['ollama_model']}"
+    elif provider == "openai":
+        mode = f"OpenAI · {ai_config['openai_model']}"
+    elif ai_config.get("ollama_configured"):
+        mode = "Ollama çevrimdışı"
+    else:
+        mode = "Yerel akıllı analiz"
     head_left, head_right = st.columns([5, 1])
     with head_left:
         st.markdown(f"""<div class="trex-chat-head"><div class="trex-chat-orb">AI</div><div><strong>Fabrika hakkında bana sor</strong><p>Normal konuşabilirsin; kısa cümleleri, yazım hatalarını ve devam sorularını anlarım.</p></div><span>{mode}</span></div>""", unsafe_allow_html=True)
@@ -718,8 +823,11 @@ def _render_chat_tab(tools, summary, api_key, model, current_role):
             st.session_state.pop("factory_ai_context", None)
             st.session_state.pop("factory_ai_response_id", None)
             st.rerun()
-    if not connected and current_role == "admin":
-        st.caption("Şu an yerel analiz motoru kullanılıyor. ChatGPT düzeyinde serbest ve derin sohbet için Streamlit Secrets içinde OPENAI_API_KEY tanımlanmalıdır.")
+    if provider == "local" and current_role == "admin":
+        if ai_config.get("ollama_configured"):
+            st.caption("Ollama şu an erişilemiyor. Bilgisayar ve güvenli köprü açıldığında otomatik bağlanacak; bu sırada yerel analiz kullanılacak.")
+        else:
+            st.caption("Ücretsiz gelişmiş sohbet için OLLAMA_BASE_URL tanımlanabilir. Tanımlanana kadar yerel analiz motoru kullanılır.")
 
     quick_questions = ["Bugün işler nasıl?", "Hangi makineye bakmalıyız?", "Geciken iş var mı?", "En büyük kayıp ne?"]
     if "get_maintenance_risks" in tools.allowed_names():
@@ -759,9 +867,14 @@ def _render_chat_tab(tools, summary, api_key, model, current_role):
         with st.chat_message("assistant", avatar="🦖"):
             with st.spinner("MES kayıtlarına bakıyorum..."):
                 try:
-                    if connected:
+                    if provider == "ollama":
+                        answer, sources = _ask_ollama(
+                            ai_config["ollama_base_url"], ai_config["ollama_token"],
+                            ai_config["ollama_model"], prompt, history, tools,
+                        )
+                    elif provider == "openai":
                         answer, sources, response_id = _ask_openai(
-                            api_key, model, prompt, history, tools,
+                            ai_config["openai_key"], ai_config["openai_model"], prompt, history, tools,
                             st.session_state.get("factory_ai_response_id", ""),
                         )
                         st.session_state["factory_ai_response_id"] = response_id
@@ -779,8 +892,10 @@ def _render_chat_tab(tools, summary, api_key, model, current_role):
 
     footer_cols = st.columns([3, 1])
     footer_cols[0].caption(f"Veri anı: {summary['as_of']} · Yanıtlar yalnızca yetkili MES verilerine dayanır.")
-    if not connected and current_role == "admin":
-        footer_cols[1].caption("OpenAI anahtarı bekleniyor")
+    if provider == "ollama":
+        footer_cols[1].caption("Ollama bağlı · API ücreti yok")
+    elif provider == "local" and ai_config.get("ollama_configured"):
+        footer_cols[1].caption("Ollama çevrimdışı · Yerel moda geçildi")
 
 
 def _render_briefing_tab(summary, priorities, current_name):
@@ -822,10 +937,26 @@ def _render_data_quality_tab(checks, confidence, summary):
 
 def render_factory_ai(query, *, current_username="", current_name="", current_role="operator"):
     api_key = _setting("OPENAI_API_KEY")
-    model = _setting("OPENAI_MODEL", "gpt-5-mini")
+    openai_model = _setting("OPENAI_MODEL", "gpt-5-mini")
+    requested_provider = _setting("AI_PROVIDER", "ollama").lower()
+    ollama_base_url = _setting("OLLAMA_BASE_URL")
+    ollama_token = _setting("OLLAMA_TOKEN")
+    ollama_model = _setting("OLLAMA_MODEL", "qwen2.5:7b")
+    ollama_online, _ = _ollama_available(ollama_base_url, ollama_token)
+    provider = "ollama" if requested_provider == "ollama" and ollama_online else "local"
+    if requested_provider == "openai" and api_key:
+        provider = "openai"
+    ai_config = {
+        "provider": provider,
+        "openai_key": api_key,
+        "openai_model": openai_model,
+        "ollama_base_url": ollama_base_url,
+        "ollama_token": ollama_token,
+        "ollama_model": ollama_model,
+        "ollama_configured": bool(ollama_base_url),
+    }
     tools = MesReadTools(query, current_role)
     summary = tools.factory_summary()
-    connected = bool(api_key)
     priorities, quality_checks, confidence = _management_snapshot(tools, summary)
 
     st.markdown("""
@@ -846,7 +977,14 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
       .stApp:has([data-testid="stChatInput"]) .main .block-container{padding-bottom:8rem!important}
     </style>
     """, unsafe_allow_html=True)
-    mode_label = f"OpenAI · {model}" if connected else "Yerel analiz modu"
+    if provider == "ollama":
+        mode_label = f"Ollama · {ollama_model}"
+    elif provider == "openai":
+        mode_label = f"OpenAI · {openai_model}"
+    elif ollama_base_url:
+        mode_label = "Ollama çevrimdışı · Yerel mod"
+    else:
+        mode_label = "Yerel analiz modu"
     st.markdown(f"""
       <div class="trex-ai-hero">
         <h2>TREX Fabrika Asistanı</h2>
@@ -873,7 +1011,7 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
         key="factory_ai_workspace",
     )
     if workspace == "Asistana Sor":
-        _render_chat_tab(tools, summary, api_key, model, current_role)
+        _render_chat_tab(tools, summary, ai_config, current_role)
     elif workspace == "Yönetim Brifingi":
         _render_briefing_tab(summary, priorities, current_name)
     else:
