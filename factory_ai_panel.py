@@ -829,6 +829,34 @@ def _render_chat_tab(tools, summary, ai_config, current_role):
         else:
             st.caption("Ücretsiz gelişmiş sohbet için OLLAMA_BASE_URL tanımlanabilir. Tanımlanana kadar yerel analiz motoru kullanılır.")
 
+    if current_role == "admin":
+        with st.expander("Yerel AI bağlantısı", expanded=bool(ai_config.get("ollama_configured") and provider == "local")):
+            st.caption("Başlatma penceresindeki adres ve geçici anahtarı buraya girin. Bilgiler yalnızca bu oturumda tutulur.")
+            if "ollama_url_input" not in st.session_state:
+                st.session_state["ollama_url_input"] = ai_config.get("ollama_base_url", "")
+            if "ollama_model_input" not in st.session_state:
+                st.session_state["ollama_model_input"] = ai_config.get("ollama_model", "qwen2.5:7b")
+            st.text_input("Köprü adresi", key="ollama_url_input", placeholder="https://...trycloudflare.com")
+            st.text_input("Geçici bağlantı anahtarı", type="password", key="ollama_token_input")
+            st.text_input("Model", key="ollama_model_input")
+            connect_col, disconnect_col = st.columns(2)
+            if connect_col.button("Ollama'ya bağlan", key="connect_ollama", use_container_width=True):
+                address = st.session_state.get("ollama_url_input", "").strip().rstrip("/")
+                token = st.session_state.get("ollama_token_input", "").strip()
+                if not address.startswith(("http://", "https://")) or not token:
+                    st.error("Geçerli bir köprü adresi ve bağlantı anahtarı girin.")
+                else:
+                    st.session_state["ollama_session_url"] = address
+                    st.session_state["ollama_session_token"] = token
+                    st.session_state["ollama_session_model"] = st.session_state.get("ollama_model_input", "qwen2.5:7b").strip()
+                    _ollama_available.clear()
+                    st.rerun()
+            if disconnect_col.button("Bağlantıyı kaldır", key="disconnect_ollama", use_container_width=True):
+                for key in ("ollama_session_url", "ollama_session_token", "ollama_session_model", "ollama_token_input"):
+                    st.session_state.pop(key, None)
+                _ollama_available.clear()
+                st.rerun()
+
     quick_questions = ["Bugün işler nasıl?", "Hangi makineye bakmalıyız?", "Geciken iş var mı?", "En büyük kayıp ne?"]
     if "get_maintenance_risks" in tools.allowed_names():
         quick_questions.append("Bakımda sıkıntı var mı?")
@@ -939,9 +967,9 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
     api_key = _setting("OPENAI_API_KEY")
     openai_model = _setting("OPENAI_MODEL", "gpt-5-mini")
     requested_provider = _setting("AI_PROVIDER", "ollama").lower()
-    ollama_base_url = _setting("OLLAMA_BASE_URL")
-    ollama_token = _setting("OLLAMA_TOKEN")
-    ollama_model = _setting("OLLAMA_MODEL", "qwen2.5:7b")
+    ollama_base_url = st.session_state.get("ollama_session_url") or _setting("OLLAMA_BASE_URL")
+    ollama_token = st.session_state.get("ollama_session_token") or _setting("OLLAMA_TOKEN")
+    ollama_model = st.session_state.get("ollama_session_model") or _setting("OLLAMA_MODEL", "qwen2.5:7b")
     ollama_online, _ = _ollama_available(ollama_base_url, ollama_token)
     provider = "ollama" if requested_provider == "ollama" and ollama_online else "local"
     if requested_provider == "openai" and api_key:
