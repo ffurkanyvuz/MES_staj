@@ -22,6 +22,8 @@ TOOL_LABELS = {
     "get_quality_summary": "Kalite görünümü",
     "get_open_actions": "Açık aksiyonlar",
     "compare_shifts": "Vardiya karşılaştırması",
+    "compare_machines": "Makine karşılaştırması",
+    "get_recent_alarms": "Alarm geçmişi",
 }
 
 
@@ -253,6 +255,40 @@ class MesReadTools:
             "actions": actions.fillna("").to_dict("records")[:20],
         }
 
+    def recent_alarms(self, days=7, machine_code=""):
+        days = max(1, min(int(days or 7), 90))
+        alarms = _safe_query(self.query, "SELECT machine_code,alarm,level,time,acknowledged FROM alarms ORDER BY id DESC LIMIT 500")
+        if alarms.empty:
+            return {"period_days": days, "total": 0, "alarms": []}
+        alarms["parsed_time"] = pd.to_datetime(alarms["time"], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=days)
+        alarms = alarms[(alarms["parsed_time"].isna()) | (alarms["parsed_time"] >= cutoff)].copy()
+        if machine_code:
+            alarms = alarms[alarms["machine_code"].astype(str).str.upper() == str(machine_code).upper()]
+        grouped = alarms.groupby(["machine_code", "alarm", "level"], dropna=False).size().reset_index(name="count").sort_values("count", ascending=False)
+        return {
+            "period_days": days,
+            "machine": machine_code or "Tümü",
+            "total": int(len(alarms)),
+            "critical": int((alarms["level"] == "Kritik").sum()),
+            "alarms": [{"machine": str(row["machine_code"]), "alarm": str(row["alarm"]), "level": str(row["level"]), "count": int(row["count"])} for _, row in grouped.head(12).iterrows()],
+        }
+
+    def compare_machines(self, machine_a, machine_b):
+        results = []
+        for code in (machine_a, machine_b):
+            analysis = self.machine_analysis(code)
+            if analysis.get("error"):
+                continue
+            results.append({
+                "machine": analysis["machine"], "status": analysis["status"], "product": analysis["product"],
+                "production": analysis["production"], "target": analysis["target"], "oee": analysis["oee"],
+                "active_alarm_count": len(analysis["active_alarms"]),
+                "recent_downtime_minutes": round(sum(_number(item.get("duration")) for item in analysis["recent_downtime"]), 1),
+                "latest_sensor": analysis["latest_sensor"][:1], "next_maintenance": analysis["next_maintenance"],
+            })
+        return {"machines": results, "note": "Karşılaştırma anlık makine kaydı ve son ilişkili MES kayıtlarına dayanır."}
+
     def compare_shifts(self):
         rows = []
         for shift, group in self.machines.groupby(self.machines["shift"].fillna("Atanmamış")):
@@ -272,7 +308,7 @@ class MesReadTools:
         return self.machines["machine_code"].dropna().astype(str).tolist() if not self.machines.empty else []
 
     def allowed_names(self):
-        common = {"get_factory_summary", "get_machine_analysis", "get_open_actions"}
+        common = {"get_factory_summary", "get_machine_analysis", "get_open_actions", "compare_machines", "get_recent_alarms"}
         role_tools = {
             "admin": set(TOOL_LABELS),
             "operator": {"get_production_performance", "get_downtime_analysis", "compare_shifts"},
@@ -291,6 +327,8 @@ class MesReadTools:
             "get_quality_summary": "Kalite oranı, hata türleri ve makine bazlı kalite sonuçlarını getir.",
             "get_open_actions": "Açık ve geciken operasyon aksiyonlarını sorumluları ve tahmini kayıplarıyla getir.",
             "compare_shifts": "Vardiyaları üretim, hedef gerçekleşme ve ortalama OEE ile karşılaştır.",
+            "compare_machines": "İki makineyi OEE, üretim, alarm, duruş, sensör ve bakım göstergeleriyle karşılaştır.",
+            "get_recent_alarms": "Belirli gün aralığındaki önemli alarmları, istenirse makine filtresiyle getir.",
         }
         tools = []
         for name in self.allowed_names():
@@ -299,6 +337,18 @@ class MesReadTools:
             if name == "get_machine_analysis":
                 properties = {"machine_code": {"type": "string", "description": "Makine kodu. Mevcut kodlar: " + ", ".join(self.machine_codes)}}
                 required = ["machine_code"]
+            elif name == "compare_machines":
+                properties = {
+                    "machine_a": {"type": "string", "description": "Birinci makine kodu"},
+                    "machine_b": {"type": "string", "description": "İkinci makine kodu"},
+                }
+                required = ["machine_a", "machine_b"]
+            elif name == "get_recent_alarms":
+                properties = {
+                    "days": {"type": "integer", "description": "İncelenecek gün sayısı, 1-90"},
+                    "machine_code": {"type": "string", "description": "İsteğe bağlı makine kodu; tüm makineler için boş metin"},
+                }
+                required = ["days", "machine_code"]
             tools.append({
                 "type": "function", "name": name, "description": descriptions[name],
                 "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
@@ -318,6 +368,8 @@ class MesReadTools:
             "get_quality_summary": self.quality_summary,
             "get_open_actions": self.open_actions,
             "compare_shifts": self.compare_shifts,
+            "compare_machines": lambda: self.compare_machines(arguments.get("machine_a", ""), arguments.get("machine_b", "")),
+            "get_recent_alarms": lambda: self.recent_alarms(arguments.get("days", 7), arguments.get("machine_code", "")),
         }
         return functions[name]()
 
@@ -332,18 +384,21 @@ def _extract_text(response):
     return "\n".join(pieces).strip()
 
 
-def _ask_openai(api_key, model, question, history, tools):
+def _ask_openai(api_key, model, question, history, tools, previous_response_id=""):
     instructions = """Sen TREX MES Fabrika Asistanısın. Yalnızca verilen MES araçlarının döndürdüğü verilere dayan.
 Kullanıcı gündelik Türkçe, kısa cümle, yazım hatası veya 'bu/peki/ona' gibi önceki mesaja gönderme kullanabilir; niyetini konuşma bağlamından çıkar.
 Samimi ama profesyonel konuş. Aynı kalıp özeti tekrarlama; doğrudan sorulan konuya cevap ver. Basit selamlaşmada araç çağırman gerekmez.
 Veriye dayalı soruda uygun aracı seç; belirli makine sorulursa get_machine_analysis kullan. Sonucu önce tek cümlede söyle, ardından yalnızca yararlı kanıt ve uygulanabilir öneriyi ver.
 Sayıları ve makine kodlarını belirt. Veri yoksa açıkça söyle, tahmin uydurma. En fazla 280 kelime yaz.
 Sistem salt okunurdur: işlem yaptığını söyleme; gerekiyorsa kullanıcıyı ilgili MES modülüne yönlendir."""
-    conversation = []
-    for item in history[-6:]:
-        conversation.append({"role": item["role"], "content": item["content"]})
-    conversation.append({"role": "user", "content": question})
+    if previous_response_id:
+        conversation = [{"role": "user", "content": question}]
+    else:
+        conversation = [{"role": item["role"], "content": item["content"]} for item in history[-8:]]
+        conversation.append({"role": "user", "content": question})
     payload = {"model": model, "instructions": instructions, "input": conversation, "tools": tools.definitions(), "max_output_tokens": 900}
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     used = []
     response = requests.post("https://api.openai.com/v1/responses", headers=headers, json=payload, timeout=50)
@@ -357,7 +412,7 @@ Sistem salt okunurdur: işlem yaptığını söyleme; gerekiyorsa kullanıcıyı
     for _ in range(3):
         calls = [item for item in data.get("output", []) if item.get("type") == "function_call"]
         if not calls:
-            return _extract_text(data) or "Bu soru için yanıt üretilemedi.", used
+            return _extract_text(data) or "Bu soru için yanıt üretilemedi.", used, data.get("id", "")
         outputs = []
         for call in calls:
             name = call.get("name", "")
@@ -376,7 +431,7 @@ Sistem salt okunurdur: işlem yaptığını söyleme; gerekiyorsa kullanıcıyı
         if not response.ok:
             raise RuntimeError("OpenAI API araç sonucu işlenemedi.")
         data = response.json()
-    return _extract_text(data) or "Analiz araç sınırına ulaştı; sorunuzu biraz daraltın.", used
+    return _extract_text(data) or "Analiz araç sınırına ulaştı; sorunuzu biraz daraltın.", used, data.get("id", "")
 
 
 def _normalise(text):
@@ -409,13 +464,32 @@ def _extract_machine(text, machine_codes):
     return ""
 
 
+def _extract_machines(text, machine_codes):
+    normal = _normalise(text)
+    found = []
+    for code in machine_codes:
+        code_normal = _normalise(code)
+        digits = re.findall(r"\d+", code_normal)
+        number = int(digits[-1]) if digits else None
+        patterns = [code_normal.replace(" ", ""), code_normal.replace(" ", "-")]
+        if any(pattern in normal.replace(" ", "") for pattern in patterns):
+            found.append(code)
+            continue
+        if number is not None and re.search(rf"\b(?:cnc|makine|makina|maikne|tezgah)\s*(?:no|numara)?\s*-?\s*0*{number}\b", normal):
+            found.append(code)
+    first = _extract_machine(text, machine_codes)
+    if first and first not in found:
+        found.append(first)
+    return found
+
+
 def _detect_intent(question, has_machine=False):
     normal = _normalise(question)
     tokens = normal.split()
     vocabulary = {
         "uretim", "hedef", "performans", "oee", "makine", "tezgah", "bakim", "ariza", "risk",
         "durus", "kayip", "bekleme", "vardiya", "aksiyon", "geciken", "kalite", "hata", "fire",
-        "alarm", "sensor", "sicaklik", "titresim", "basinc", "ozet", "durum", "bugun", "neden",
+        "alarm", "sensor", "sicaklik", "titresim", "basinc", "ozet", "durum", "bugun", "neden", "karsilastir",
     }
     corrected = []
     for token in tokens:
@@ -438,6 +512,7 @@ def _detect_intent(question, has_machine=False):
         "shift": sum(word in text for word in ("vardiya", "sabah", "aksam", "gece", "operator")),
         "actions": sum(word in text for word in ("aksiyon", "geciken", "sorumlu", "termin", "gorev")),
         "production": sum(word in text for word in ("uretim", "hedef", "performans", "oee", "verim", "geride")),
+        "alarms": sum(word in text for word in ("alarm", "uyari", "kritik", "ikaz")),
         "factory": sum(word in text for word in ("ozet", "durum", "bugun", "fabrika", "nasil gidiyor", "sikinti", "kritik")),
     }
     best = max(scores, key=scores.get)
@@ -446,13 +521,17 @@ def _detect_intent(question, has_machine=False):
 
 def _local_answer(question, tools, history=None):
     allowed = tools.allowed_names()
-    machine_code = _extract_machine(question, tools.machine_codes)
+    mentioned_machines = _extract_machines(question, tools.machine_codes)
+    machine_code = mentioned_machines[0] if mentioned_machines else ""
     context = st.session_state.get("factory_ai_context", {})
     normal = _normalise(question)
-    follow_up = len(normal.split()) <= 7 and any(word in normal for word in ("bu", "peki", "neden", "niye", "daha", "detay", "onda"))
+    follow_up = len(normal.split()) <= 9 and any(word in normal for word in ("bu", "peki", "neden", "niye", "daha", "detay", "onda", "ne yap", "nasil", "hangisi"))
     if not machine_code and follow_up:
         machine_code = context.get("machine", "")
-    intent = _detect_intent(question, bool(machine_code))
+    if len(mentioned_machines) >= 2 or "karsilastir" in normal or "kiyasla" in normal:
+        intent = "comparison"
+    else:
+        intent = _detect_intent(question, bool(machine_code))
     if intent == "factory" and follow_up and context.get("intent"):
         intent = context["intent"]
     st.session_state["factory_ai_context"] = {"intent": intent, "machine": machine_code or context.get("machine", "")}
@@ -464,6 +543,22 @@ def _local_answer(question, tools, history=None):
     if intent == "help":
         return ("Üretim hedefini, makine OEE’sini, duruş nedenlerini, bakım risklerini, kalite kayıplarını, vardiyaları ve açık aksiyonları inceleyebilirim. "
                 "Resmî cümle kurmana gerek yok; **‘bugün işler nasıl?’**, **‘CNC-03’e ne olmuş?’** ya da **‘en büyük kayıp nerede?’** demen yeterli.", [])
+
+    if intent == "comparison":
+        if len(mentioned_machines) < 2:
+            return "Karşılaştırmak istediğin iki makineyi söyler misin? Örneğin **‘CNC-02 ile CNC-03’ü karşılaştır’** diyebilirsin.", []
+        result = tools.compare_machines(mentioned_machines[0], mentioned_machines[1]).get("machines", [])
+        if len(result) < 2:
+            return "İki makinenin de karşılaştırma verisine ulaşamadım.", ["compare_machines"]
+        a, b = result
+        winner = a if a["oee"]["oee_pct"] >= b["oee"]["oee_pct"] else b
+        lines = [f"Şu an genel verimlilikte **{winner['machine']}** daha iyi görünüyor: OEE %{winner['oee']['oee_pct']:.1f}."]
+        for item in (a, b):
+            target_pct = item["production"] / item["target"] * 100 if item["target"] else 0
+            lines.append(f"- **{item['machine']}** — {item['status']}; OEE %{item['oee']['oee_pct']:.1f}, hedef %{target_pct:.1f}, {item['active_alarm_count']} açık alarm, son duruş {item['recent_downtime_minutes']:.0f} dk")
+        lines.append("Bu karşılaştırma nedensellik iddiası değildir; farkın kaynağını görmek için zayıf makinenin OEE bileşenleri ve duruşları incelenmelidir.")
+        st.session_state["factory_ai_context"]["machine"] = (b if winner is a else a)["machine"]
+        return "\n\n".join(lines), ["compare_machines"]
 
     if intent == "machine":
         if not machine_code:
@@ -523,6 +618,16 @@ def _local_answer(question, tools, history=None):
         rows = actions.get("actions", [])
         detail = "\n".join(f"- **{item.get('priority', '')} · {item.get('title', '')}** — {item.get('owner_name') or 'Sorumlu yok'}, termin {item.get('due_at') or 'yok'}" for item in rows[:5]) or "- Açık aksiyon bulunmuyor."
         return f"Toplam **{actions['open_count']} açık**, **{actions['overdue_count']} gecikmiş** aksiyon var. Tahmini toplam kayıp **{actions['estimated_loss']:.1f}**.\n\n{detail}\n\nGeciken ve sorumlusu olmayan kayıtları önce ele almak gerekir.", ["get_open_actions"]
+
+    if intent == "alarms":
+        day_match = re.search(r"(?:son\s*)?(\d+)\s*gun", normal)
+        days = int(day_match.group(1)) if day_match else 7
+        data = tools.recent_alarms(days, machine_code)
+        items = data.get("alarms", [])
+        if not items:
+            return f"Son {data['period_days']} gün için eşleşen alarm kaydı bulamadım.", ["get_recent_alarms"]
+        detail = "\n".join(f"- **{item['machine']} · {item['level']}** — {item['alarm']} ({item['count']} kez)" for item in items[:6])
+        return f"Son **{data['period_days']} günde {data['total']} alarm** var; bunların **{data['critical']} tanesi kritik** seviyede.\n\n{detail}\n\nEn sık tekrarlanan alarmı sensör eğilimi ve duruş zamanlarıyla birlikte kontrol etmek gerekir.", ["get_recent_alarms"]
 
     if intent == "production" and "get_production_performance" in allowed:
         production = tools.production_performance()["machines"]
@@ -611,7 +716,10 @@ def _render_chat_tab(tools, summary, api_key, model, current_role):
         if st.button("Sohbeti temizle", key="clear_factory_chat", use_container_width=True):
             st.session_state.pop("factory_ai_messages", None)
             st.session_state.pop("factory_ai_context", None)
+            st.session_state.pop("factory_ai_response_id", None)
             st.rerun()
+    if not connected and current_role == "admin":
+        st.caption("Şu an yerel analiz motoru kullanılıyor. ChatGPT düzeyinde serbest ve derin sohbet için Streamlit Secrets içinde OPENAI_API_KEY tanımlanmalıdır.")
 
     quick_questions = ["Bugün işler nasıl?", "Hangi makineye bakmalıyız?", "Geciken iş var mı?", "En büyük kayıp ne?"]
     if "get_maintenance_risks" in tools.allowed_names():
@@ -651,7 +759,14 @@ def _render_chat_tab(tools, summary, api_key, model, current_role):
         with st.chat_message("assistant", avatar="🦖"):
             with st.spinner("MES kayıtlarına bakıyorum..."):
                 try:
-                    answer, sources = _ask_openai(api_key, model, prompt, history, tools) if connected else _local_answer(prompt, tools, history)
+                    if connected:
+                        answer, sources, response_id = _ask_openai(
+                            api_key, model, prompt, history, tools,
+                            st.session_state.get("factory_ai_response_id", ""),
+                        )
+                        st.session_state["factory_ai_response_id"] = response_id
+                    else:
+                        answer, sources = _local_answer(prompt, tools, history)
                 except Exception as exc:
                     answer, sources = _local_answer(prompt, tools, history)
                     if current_role == "admin":
