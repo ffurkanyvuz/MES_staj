@@ -9,7 +9,17 @@ Bu yapı OpenAI API kullanmaz. Yapay zekâ yalnızca bilgisayar, Ollama, TREX k�
 3. Cloudflared aracını kurun.
 4. Uzun ve rastgele bir köprü anahtarı oluşturun. Bu anahtarı GitHub'a yazmayın.
 
-## Her kullanımda
+## Her kullanımda (önerilen tek adım)
+
+Proje klasöründe aşağıdaki dosyaya sağ tıklayıp **PowerShell ile çalıştır** seçeneğini kullanın:
+
+`start_trex_ollama.ps1`
+
+Pencerede gösterilen köprü adresi ve geçici bağlantı anahtarını TREX MES içinde **Akıllı Analiz > Yerel AI bağlantısı** alanına girin. Pencere açık kaldığı sürece yapay zekâ çalışır; pencere kapatılınca TREX MES otomatik olarak temel yerel moda döner.
+
+Bu bilgisayarda CUDA uyumsuzluğu görüldüğü için başlatıcı Ollama'yı `cpu_avx2` modunda çalıştırır.
+
+## Elle başlatma
 
 Üç ayrı PowerShell penceresinde çalıştırın:
 
@@ -39,5 +49,4 @@ Hızlı tünel adresi her yeniden başlatmada değişebilir. Sabit adres için d
 - `OLLAMA_TOKEN` değerini sohbet, GitHub veya ekran görüntüsünde paylaşmayın.
 - Ollama'nın `11434` portunu doğrudan internete açmayın.
 - İşiniz bitince köprü ve tünel pencerelerini kapatabilirsiniz.
-
 
