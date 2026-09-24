@@ -454,9 +454,9 @@ Kullanıcının yazım hatalarını ve önceki konuşmaya yaptığı göndermele
 Fabrika hakkında yalnızca MES_CONTEXT içindeki kanıtlara dayan; sayı veya olay uydurma.
 Önce sorunun net cevabını ver, sonra gerekli kanıtları ve en fazla üç uygulanabilir öneriyi yaz.
 Sistem salt okunurdur; bir işlemi gerçekten yapmış gibi konuşma. Veri yetersizse açıkça belirt.
-Gereksiz genel özet tekrarlama ve en fazla 320 kelime kullan."""
+Gereksiz genel özet tekrarlama; doğrudan konuş ve en fazla 140 kelime kullan."""
     messages = [{"role": "system", "content": system}]
-    for item in history[-8:]:
+    for item in history[-4:]:
         if item.get("role") in ("user", "assistant") and item.get("content"):
             messages.append({"role": item["role"], "content": str(item["content"])[:3000]})
     messages.append({
@@ -470,7 +470,9 @@ Gereksiz genel özet tekrarlama ve en fazla 320 kelime kullan."""
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": 0.2, "num_ctx": 8192},
+        # CPU üzerinde çalışan yerel modellerde bulut tünelinin zaman aşımına
+        # uğramaması için bağlamı ve yanıt uzunluğunu kontrollü tutuyoruz.
+        "options": {"temperature": 0.2, "num_ctx": 4096, "num_predict": 180},
     }
     response = requests.post(_ollama_endpoint(base_url, "chat"), headers=headers, json=payload, timeout=120)
     if not response.ok:
