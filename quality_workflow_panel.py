@@ -25,8 +25,134 @@ def _safe(value):
     return html.escape(str(value or "—"))
 
 
+def _db_value(row, key, index):
+    """SQLite Row ve PostgreSQL dict satırlarını ortak biçimde okur."""
+    try:
+        return row[key]
+    except (TypeError, KeyError, IndexError):
+        return row[index]
+
+
+def _seed_quality_workflow_examples(connection):
+    """Yeni kalite iş akışlarını anlaşılır, idempotent örneklerle doldurur."""
+    machines = connection.execute(
+        "SELECT id,machine_code,product FROM machines ORDER BY id LIMIT 3"
+    ).fetchall()
+    machine_rows = []
+    for index in range(3):
+        if index < len(machines):
+            row = machines[index]
+            machine_rows.append((
+                str(_db_value(row, "machine_code", 1)),
+                str(_db_value(row, "product", 2) or f"Örnek Ürün {index + 1}"),
+            ))
+        else:
+            machine_rows.append((f"CNC-0{index + 1}", ["Mil Parçası", "Flanş", "Gövde"][index]))
+
+    plan_definitions = [
+        ("KP-DEMO-001", machine_rows[0][1], "Torna", "İlk Onay", "Dış Çap", "mm", 24.90, 25.10, 5, "İş Emri Başlangıcı", 0, machine_rows[0][0], "Dijital Kumpas"),
+        ("KP-DEMO-002", machine_rows[1][1], "İşleme", "Frekansiyel", "Kalınlık", "mm", 7.95, 8.05, 3, "Üretim Adedi", 1000, machine_rows[1][0], "Mikrometre"),
+        ("KP-DEMO-003", machine_rows[2][1], "Final", "Final", "Yüzey Pürüzlülüğü", "Ra", 0.00, 1.60, 4, "İş Emri Tamamlanması", 0, machine_rows[2][0], "Pürüzlülük Ölçer"),
+        ("KP-DEMO-004", machine_rows[0][1], "Bakım Sonrası", "Bakım Sonrası", "Salınım", "mm", 0.00, 0.03, 3, "Bakım Tamamlanması", 0, machine_rows[0][0], "Komparatör"),
+    ]
+    plan_ids = {}
+    for definition in plan_definitions:
+        existing = connection.execute("SELECT id FROM quality_control_plans WHERE plan_code=?", (definition[0],)).fetchone()
+        if existing:
+            plan_ids[definition[0]] = int(_db_value(existing, "id", 0))
+            continue
+        plan_id = _id()
+        plan_ids[definition[0]] = plan_id
+        connection.execute("""INSERT INTO quality_control_plans(
+            id,plan_code,product,operation_name,inspection_stage,characteristic,unit,spec_low,spec_high,
+            sample_size,trigger_type,frequency_qty,machine_code,instrument,active,created_at,created_by)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (plan_id, *definition, 1, _now(), "Örnek Veri"))
+
+    task_definitions = [
+        ("KK-DEMO-001", "demo:first", "KP-DEMO-001", "WO-001", machine_rows[0][0], machine_rows[0][1], "İlk Onay", "İş emri başlangıç kontrolü", 0, "Bekliyor", None, None, "İlk 5 parçanın ölçümü bekleniyor", None, None),
+        ("KK-DEMO-002", "demo:frequency", "KP-DEMO-002", "WO-002", machine_rows[1][0], machine_rows[1][1], "Frekansiyel", "1.000 adet kontrolü yaklaşıyor (950 üretildi)", 1000, "Kontrolde", None, None, "Kalite personeline atandı", None, "trex Kalite"),
+        ("KK-DEMO-003", "demo:final", "KP-DEMO-003", "WO-003", machine_rows[2][0], machine_rows[2][1], "Final", "İş emri tamamlanma kontrolü", 800, "Onaylandı", "Uygun", 1.20, "Final numuneleri uygun", _now(), "trex Kalite"),
+        ("KK-DEMO-004", "demo:maintenance", "KP-DEMO-004", "WO-004", machine_rows[0][0], machine_rows[0][1], "Bakım Sonrası", "Periyodik bakım tamamlandı", 0, "Reddedildi", "Uygun Değil", 0.06, "Salınım üst limitin üzerinde", _now(), "trex Kalite"),
+    ]
+    task_ids = {}
+    for task in task_definitions:
+        existing = connection.execute("SELECT id FROM quality_inspection_tasks WHERE task_code=?", (task[0],)).fetchone()
+        if existing:
+            task_ids[task[0]] = int(_db_value(existing, "id", 0))
+            continue
+        task_id = _id()
+        task_ids[task[0]] = task_id
+        connection.execute("""INSERT INTO quality_inspection_tasks(
+            id,task_code,source_key,plan_id,work_order,machine_code,product,inspection_stage,trigger_reason,
+            due_quantity,status,result,measured_value,notes,assigned_role,created_at,completed_at,inspector)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (task_id, task[0], task[1], plan_ids[task[2]], *task[3:13], "quality", _now(), task[13], task[14]))
+
+    nc_definitions = [
+        ("UYG-DEMO-001", task_ids["KK-DEMO-004"], machine_rows[0][0], machine_rows[0][1], "LOT-2609-A", "WO-004", "Salınım tolerans dışı", 5, "Karantina", "DÖF Açıldı", "Kalite Lideri", "Bakım sonrası ilk ürün kontrolünde üst limit aşıldı."),
+        ("UYG-DEMO-002", None, machine_rows[1][0], machine_rows[1][1], "LOT-2609-B", "WO-002", "Yüzey çizikleri", 12, "Yeniden İşleme", "İncelemede", "Hat Sorumlusu", "Görsel kontrolde yüzey çizikleri tespit edildi."),
+    ]
+    nc_ids = {}
+    for nc in nc_definitions:
+        existing = connection.execute("SELECT id FROM quality_nonconformities WHERE nc_code=?", (nc[0],)).fetchone()
+        if existing:
+            nc_ids[nc[0]] = int(_db_value(existing, "id", 0))
+            continue
+        nc_id = _id()
+        nc_ids[nc[0]] = nc_id
+        connection.execute("""INSERT INTO quality_nonconformities(
+            id,nc_code,inspection_task_id,machine_code,product,lot_code,work_order,defect_type,quantity,
+            disposition,status,owner,description,created_at,closed_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (nc_id, *nc, _now(), None))
+
+    analysis_row = connection.execute(
+        "SELECT id FROM five_why_analyses WHERE source_type='Uygunsuzluk' AND source_id=?",
+        (nc_ids["UYG-DEMO-001"],),
+    ).fetchone()
+    if analysis_row:
+        analysis_id = int(_db_value(analysis_row, "id", 0))
+    else:
+        analysis_id = _id()
+        connection.execute("""INSERT INTO five_why_analyses(
+            id,title,event_type,source_type,source_id,machine_code,event_description,priority,status,owner,due_date,
+            root_cause,containment_action,corrective_action,verification_method,created_by,created_at,completed_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (analysis_id, "Bakım sonrası salınım tolerans dışı", "Kalite Uygunsuzluğu", "Uygunsuzluk",
+             nc_ids["UYG-DEMO-001"], machine_rows[0][0], "İlk ürün ölçümünde salınım 0,06 mm ölçüldü.",
+             "Yüksek", "Aksiyon Açık", "Bakım Lideri", (date.today() + timedelta(days=7)).isoformat(),
+             "Mil-kaplin hizalaması bakım sonrasında doğrulanmadı.", "Ürünler karantinaya alındı.",
+             "Hizalama kontrol listesi ve bakım sonrası kalite onayı zorunlu hâle getirilecek.",
+             "Ardışık 3 üretimde salınım ≤0,03 mm", "Örnek Veri", _now(), None))
+        why_steps = [
+            "Mil salınımı toleransın üzerinde kaldı.",
+            "Kaplin hizalaması doğru yapılmadı.",
+            "Bakım sonrası hizalama ölçümü atlandı.",
+            "Bakım kontrol listesinde ölçüm adımı bulunmuyordu.",
+            "Bakım ve kalite onay akışları birbirine bağlı değildi.",
+        ]
+        for step_no, answer in enumerate(why_steps, 1):
+            connection.execute(
+                "INSERT INTO five_why_steps(id,analysis_id,step_no,question,answer) VALUES(?,?,?,?,?)",
+                (_id(), analysis_id, step_no, f"{step_no}. neden?", answer),
+            )
+
+    existing_capa = connection.execute("SELECT id FROM quality_capa WHERE capa_code='DOF-DEMO-001'").fetchone()
+    if not existing_capa:
+        connection.execute("""INSERT INTO quality_capa(
+            id,capa_code,nonconformity_id,title,source_type,priority,root_cause,containment_action,corrective_action,
+            preventive_action,owner,due_date,status,effectiveness_result,five_why_analysis_id,created_at,completed_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (_id(), "DOF-DEMO-001", nc_ids["UYG-DEMO-001"], "Bakım sonrası hizalama standardı", "Uygunsuzluk",
+             "Yüksek", "Bakım kontrol listesinde hizalama doğrulaması bulunmaması", "Şüpheli lot karantinaya alındı",
+             "Kaplin yeniden hizalanacak ve ilk ürün kalite kontrolünden geçirilecek",
+             "Bakım formuna ölçüm değeri ve kalite onayı zorunluluğu eklenecek", "Bakım Lideri",
+             (date.today() + timedelta(days=7)).isoformat(), "Uygulanıyor", "", analysis_id, _now(), None))
+
+
 @st.cache_resource(show_spinner=False)
-def ensure_quality_workflow_schema(database_identity, _connection_factory, schema_version="quality-workflow-v1"):
+def ensure_quality_workflow_schema(database_identity, _connection_factory, schema_version="quality-workflow-v2-demo"):
     """Kalite kontrol planı, muayene, uygunsuzluk ve DÖF tablolarını kurar."""
     connection = _connection_factory()
     connection.execute("""
@@ -117,6 +243,7 @@ def ensure_quality_workflow_schema(database_identity, _connection_factory, schem
     connection.execute("CREATE INDEX IF NOT EXISTS idx_quality_tasks_machine ON quality_inspection_tasks(machine_code,work_order)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_quality_nc_status ON quality_nonconformities(status,created_at)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_quality_capa_status ON quality_capa(status,due_date)")
+    _seed_quality_workflow_examples(connection)
     connection.commit()
     connection.close()
     return True

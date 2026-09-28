@@ -1774,10 +1774,10 @@ notification_database_identity = (
 )
 ensure_notification_schema(notification_database_identity)
 ensure_spc_schema(notification_database_identity)
-from quality_workflow_panel import ensure_quality_workflow_schema
-ensure_quality_workflow_schema(notification_database_identity, conn)
 ensure_maturity_schema(notification_database_identity)
 ensure_five_why_schema(notification_database_identity)
+from quality_workflow_panel import ensure_quality_workflow_schema
+ensure_quality_workflow_schema(notification_database_identity, conn)
 ensure_action_center_schema(notification_database_identity)
 
 
