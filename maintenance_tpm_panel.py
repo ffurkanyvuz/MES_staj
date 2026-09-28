@@ -31,7 +31,7 @@ def _db_value(row, key, index):
 
 
 @st.cache_resource(show_spinner=False)
-def ensure_tpm_schema(database_identity, _connection_factory, schema_version="tpm-v1"):
+def ensure_tpm_schema(database_identity, _connection_factory, schema_version="tpm-v2-verification-demo"):
     connection = _connection_factory()
     connection.execute("""
         CREATE TABLE IF NOT EXISTS maintenance_work_orders(
@@ -150,6 +150,25 @@ def ensure_tpm_schema(database_identity, _connection_factory, schema_version="tp
              (datetime.now() - timedelta(hours=1, minutes=45)).strftime("%Y-%m-%d %H:%M:%S"),
              (datetime.now() - timedelta(hours=1, minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
              "İnceleniyor", "Rulman ve kaplin kontrolü", "Bekliyor", 72.1, 78.0, 5.8, "Örnek Veri", _now()))
+    if not connection.execute("SELECT id FROM maintenance_work_orders WHERE wo_code='BE-DEMO-002'").fetchone():
+        completed_at = datetime.now() - timedelta(days=3)
+        connection.execute("""INSERT INTO maintenance_work_orders(
+            id,wo_code,machine_code,maintenance_type,priority,description,status,technician,failure_detected_at,
+            acknowledged_at,work_started_at,repair_completed_at,returned_to_service_at,root_cause,
+            corrective_action,verification_status,verification_note,pre_oee,pre_temperature,pre_vibration,
+            post_oee,post_temperature,post_vibration,created_by,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (_id(), "BE-DEMO-002", machine_codes[0], "Önleyici Bakım", "Normal",
+             "Fener mili titreşim ve sıcaklık iyileştirmesi", "Tamamlandı", "Mehmet Kaya",
+             completed_at.strftime("%Y-%m-%d %H:%M:%S"),
+             (completed_at + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
+             (completed_at + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
+             (completed_at + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+             (completed_at + timedelta(hours=2, minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
+             "Kaplin hizasızlığı ve yetersiz yağlama",
+             "Kaplin yeniden hizalandı, rulman yağlandı ve bağlantılar sıkıldı", "Etkili",
+             "Titreşim 5,2'den 2,4 mm/s'ye düştü; OEE %74,2'den %83,6'ya yükseldi.",
+             74.2, 82.0, 5.2, 83.6, 68.4, 2.4, "Örnek Veri", completed_at.strftime("%Y-%m-%d %H:%M:%S")))
     if not connection.execute("SELECT id FROM autonomous_maintenance_checks WHERE check_code='OB-DEMO-001'").fetchone():
         connection.execute("""INSERT INTO autonomous_maintenance_checks(
             id,check_code,machine_code,shift_name,operator_name,check_date,cleaning_ok,lubrication_ok,leak_ok,
