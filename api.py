@@ -13,9 +13,6 @@ except ImportError:
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-
-from process_data_core import ensure_process_data_schema, record_tag_reading
 
 try:
     import psycopg
@@ -179,57 +176,6 @@ def get_machine(machine_code: str):
 @app.get("/api/v1/sensors", dependencies=[Depends(require_api_key)], tags=["Canlı Veri"])
 def get_sensors():
     return rows("SELECT * FROM sensors ORDER BY machine_code")
-
-
-class TagReadingInput(BaseModel):
-    tag_code: str = Field(min_length=2, max_length=120)
-    value: float
-    quality: str = Field(default="İyi", max_length=30)
-    timestamp: str | None = None
-
-
-@app.get("/api/v1/tags", dependencies=[Depends(require_api_key)], tags=["Proses Verisi"])
-def get_process_tags(active_only: bool = Query(default=True)):
-    try:
-        ensure_process_data_schema(conn)
-        where = "WHERE active=1" if active_only else ""
-        tags = rows(f"""SELECT tag_code,tag_name,machine_code,category,unit,data_type,source_type,
-            source_address,sample_interval_seconds,current_value,value_quality,last_seen_at,active
-            FROM process_tags {where} ORDER BY machine_code,tag_code""")
-        sensor_map = {item["machine_code"]: item for item in rows(
-            "SELECT machine_code,temperature,vibration,pressure,rpm,timestamp FROM sensors"
-        )}
-        for tag in tags:
-            sensor = sensor_map.get(tag.get("machine_code"), {})
-            field = tag.get("source_address")
-            if tag.get("source_type") == "Simülasyon" and field in {"temperature", "vibration", "pressure", "rpm"}:
-                tag["current_value"] = sensor.get(field, tag.get("current_value"))
-                tag["last_seen_at"] = sensor.get("timestamp", tag.get("last_seen_at"))
-        return tags
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Etiket altyapısı kullanılamıyor: {type(exc).__name__}") from exc
-
-
-@app.post("/api/v1/tags/readings", dependencies=[Depends(require_api_key)], tags=["Proses Verisi"])
-def ingest_tag_reading(payload: TagReadingInput):
-    try:
-        ensure_process_data_schema(conn)
-        return {
-            "status": "accepted",
-            "reading": record_tag_reading(
-                conn,
-                payload.tag_code.strip().upper(),
-                payload.value,
-                payload.quality.strip() or "İyi",
-                payload.timestamp,
-            ),
-        }
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Etiket okuması kaydedilemedi: {type(exc).__name__}") from exc
 
 
 @app.get("/alarms", dependencies=[Depends(require_api_key)], tags=["Operasyon"])
