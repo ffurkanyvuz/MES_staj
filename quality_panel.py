@@ -7,6 +7,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from quality_workflow_panel import (
+    quality_workflow_metrics,
+    render_capa,
+    render_control_plans,
+    render_inspection_tasks,
+    render_nonconformities,
+)
+
 
 GREEN = "#0b9257"
 RED = "#e65258"
@@ -46,7 +54,7 @@ def _quality_summaries(data):
     return total, good, defective, rate, machine, reasons
 
 
-def render_quality_panel(query, execute, machines, has_role):
+def render_quality_panel(query, execute, machines, has_role, current_user="", notifier=None):
     records = query("""
         SELECT q.id,q.machine_code,q.product,q.produced,q.defective,
                COALESCE(q.defect_reason,'Belirtilmemiş') AS defect_reason,q.timestamp,
@@ -63,6 +71,7 @@ def render_quality_panel(query, execute, machines, has_role):
     .ql-stat{min-height:78px;background:linear-gradient(125deg,#fff,#eff9f4);border:1px solid #d6ebe2;border-left:4px solid var(--ql-color);border-radius:9px;padding:9px 12px;box-sizing:border-box}
     .ql-stat small{display:block;color:#49675a;font-size:10px;font-weight:800}.ql-stat b{display:block;color:#0b5239;font-size:21px;line-height:29px}.ql-stat span{font-size:9px;color:#688377}
     .ql-panel-title{font-size:13px;font-weight:850;color:#12583e;margin-bottom:7px}.spc-state{padding:11px 14px;border-radius:9px;border:1px solid var(--state-border);background:var(--state-bg);color:var(--state-text);font-weight:850;margin:5px 0 10px}.spc-note{font-size:11px;color:#638071}
+    .ql-workflow-label{font-size:9px;font-weight:900;letter-spacing:.14em;color:#5d7c6d;margin:10px 1px 5px}
     div[data-baseweb="tab-list"]{gap:5px;border-bottom:1px solid #d9ece2}button[data-baseweb="tab"]{height:40px;padding:0 17px;border-radius:8px 8px 0 0;font-weight:750}
     </style>
     """, unsafe_allow_html=True)
@@ -102,7 +111,19 @@ def render_quality_panel(query, execute, machines, has_role):
         ("Aktif Makine", f"{machine_summary['machine_code'].nunique()}", "Kalite kaydı olan", BLUE),
     ])
 
-    overview_tab, defect_tab, spc_tab, pareto_tab = st.tabs(["Genel Bakış", "Hata Analizi", "SPC Analizi", "Pareto Analizi"])
+    active_plans, waiting_tasks, open_nc, overdue_capa = quality_workflow_metrics(query)
+    st.markdown('<div class="ql-workflow-label">KALİTE İŞ AKIŞI</div>', unsafe_allow_html=True)
+    _metric_cards([
+        ("Aktif Kontrol Planı", str(active_plans), "Dijital kontrol standardı", BLUE),
+        ("Bekleyen Kontrol", str(waiting_tasks), "Kalite personeli aksiyonu", AMBER if waiting_tasks else GREEN),
+        ("Açık Uygunsuzluk", str(open_nc), "Karantina / karar bekleyen", RED if open_nc else GREEN),
+        ("Geciken DÖF", str(overdue_capa), "Termin aşımı", RED if overdue_capa else GREEN),
+    ])
+
+    overview_tab, task_tab, plan_tab, defect_tab, spc_tab, pareto_tab, nc_tab, capa_tab = st.tabs([
+        "Genel Bakış", "Kontrol Görevleri", "Kontrol Planları", "Hata Analizi",
+        "SPC Analizi", "Pareto Analizi", "Uygunsuzluk", "DÖF / 5 Why",
+    ])
 
     with overview_tab:
         left, right = st.columns([1.15, 1], gap="small")
@@ -119,6 +140,18 @@ def render_quality_panel(query, execute, machines, has_role):
             table = machine_summary.rename(columns={"machine_code": "Makine"}).copy()
             table["Kalite Oranı"] = table["Kalite Oranı"].map(lambda x: f"%{x:.1f}")
             st.dataframe(table[["Makine", "Toplam Üretim", "Uygun", "Hatalı", "Kalite Oranı"]], hide_index=True, use_container_width=True, height=310)
+
+    with task_tab:
+        render_inspection_tasks(
+            query, execute, current_user=current_user,
+            can_manage=has_role("admin", "quality"), notifier=notifier,
+        )
+
+    with plan_tab:
+        render_control_plans(
+            query, execute, machines, current_user=current_user,
+            can_manage=has_role("admin", "quality"),
+        )
 
     with defect_tab:
         top_defect = reason_totals.index[0] if not reason_totals.empty else "—"
@@ -240,6 +273,18 @@ def render_quality_panel(query, execute, machines, has_role):
             display_pareto = pareto_frame.copy()
             display_pareto["Kümülatif %"] = display_pareto["Kümülatif %"].map(lambda x: f"%{x:.1f}")
             st.dataframe(display_pareto, hide_index=True, use_container_width=True)
+
+    with nc_tab:
+        render_nonconformities(
+            query, execute, current_user=current_user,
+            can_manage=has_role("admin", "quality"),
+        )
+
+    with capa_tab:
+        render_capa(
+            query, execute, current_user=current_user,
+            can_manage=has_role("admin", "quality"),
+        )
 
     with st.expander("Rapor ve dışa aktarma"):
         report = data[["timestamp", "machine_code", "product", "produced", "defective", "defect_reason", "shift"]]
