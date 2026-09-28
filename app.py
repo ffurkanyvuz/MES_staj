@@ -1199,15 +1199,15 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
-    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
-    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "🛰️ Proses Verisi", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
+    "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "🛰️ Proses Verisi", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
+    "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "🛰️ Proses Verisi", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
 }
 
 NAV_LABELS = {
     "🏠 Ana Sayfa": "Genel Bakış", "🏭 Makine": "Makineler", "📈 Üretim": "Üretim",
     "🧮 Manuel OEE": "OEE Hesaplama", "🚨 Alarmlar": "Alarm Yönetimi", "📋 İş Emirleri": "İş Emirleri",
-    "📡 Sensörler": "Sensörler", "⏱️ Duruşlar": "Duruş Yönetimi", "👷 Vardiya": "Vardiyalar",
+    "📡 Sensörler": "Sensörler", "🛰️ Proses Verisi": "Proses Veri Toplama", "⏱️ Duruşlar": "Duruş Yönetimi", "👷 Vardiya": "Vardiyalar",
     "🧰 Bakım Talebi": "Bakım Talepleri", "✅ Kalite": "Kalite", "🔧 Bakım": "Bakım Yönetimi",
     "📦 Stok": "Stok", "🔎 Detay": "Makine Detayı", "📄 Raporlar": "Raporlar",
     "📺 Andon Ekranı": "Andon Panosu", "🔳 QR Makine": "QR Makine", "📜 Denetim Kaydı": "Denetim ve Yedekleme",
@@ -1780,6 +1780,8 @@ from quality_workflow_panel import ensure_quality_workflow_schema
 ensure_quality_workflow_schema(notification_database_identity, conn)
 from maintenance_tpm_panel import ensure_tpm_schema
 ensure_tpm_schema(notification_database_identity, conn)
+from process_data_panel import ensure_process_data_schema
+ensure_process_data_schema(notification_database_identity, conn)
 ensure_action_center_schema(notification_database_identity)
 
 
@@ -2795,6 +2797,7 @@ module_page_info = {
     "🚨 Alarmlar": ("Alarmlar", "Alarm kayıtları ve müdahale takibi"),
     "📋 İş Emirleri": ("İş Emirleri", "Aktif ve planlı iş emirleri"),
     "📡 Sensörler": ("Sensörler", "Canlı sensör verileri ve geçmiş değerler"),
+    "🛰️ Proses Verisi": ("Proses Veri Toplama", "Etiket, veri kaynağı ve lisans kapasitesi yönetimi"),
     "⏱️ Duruşlar": ("Duruşlar", "Duruş süreleri ve neden analizi"),
     "👷 Vardiya": ("Vardiya", "Vardiya ve operatör bilgileri"),
     "✅ Kalite": ("Kalite", "Ürün kalitesi ve hata oranları"),
@@ -3192,7 +3195,7 @@ with st.sidebar:
 
     module_groups = {
         "GENEL BAKIŞ": ["🏠 Ana Sayfa", "🏭 Makine", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE"],
-        "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
+        "OPERASYON": ["🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "🛰️ Proses Verisi", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi"],
         "KALİTE VE BAKIM": ["✅ Kalite", "🔧 Bakım", "📦 Stok"],
         "YÖNETİM": ["🎯 Aksiyon Merkezi", "🤖 Fabrika Asistanı", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "📜 Denetim Kaydı", "👥 Kullanıcı Yönetimi", "📊 Veritabanı"],
     }
@@ -5534,6 +5537,17 @@ if selected_module == "📡 Sensörler":
                 st.plotly_chart(fig,use_container_width=True,key=f"sensor_{field}_{selected_sensor_machine}",config={"displayModeBar":False})
 
 
+if selected_module == "🛰️ Proses Verisi":
+    from process_data_panel import render_process_data_panel
+    render_process_data_panel(
+        q,
+        execute,
+        df,
+        current_user=st.session_state.get("username", ""),
+        can_manage=has_role("admin"),
+        api_url=API_URL if API_CONFIGURED else "",
+    )
+
 if selected_module == "⏱️ Duruşlar":
     from downtime_panel import render_downtime_panel
     render_downtime_panel(q, df)
@@ -6645,6 +6659,10 @@ if selected_module == "📊 Veritabanı":
         "work_orders",
         "sensors",
         "sensor_history",
+        "process_tags",
+        "process_tag_readings",
+        "process_data_sources",
+        "process_data_licenses",
         "quality",
         "maintenance",
         "operators",
@@ -6666,6 +6684,10 @@ if selected_module == "📊 Veritabanı":
         "work_orders": "İş emirleri ve ilerleme bilgileri",
         "sensors": "Anlık sensör değerleri",
         "sensor_history": "Sensör zaman serisi",
+        "process_tags": "Proses veri toplama etiket tanımları",
+        "process_tag_readings": "Etiket bazlı proses veri geçmişi",
+        "process_data_sources": "Simülasyon, API ve PLC veri kaynakları",
+        "process_data_licenses": "Etiket lisans kapasitesi",
         "quality": "Kalite kontrol kayıtları",
         "maintenance": "Bakım planı ve geçmişi",
         "operators": "Operatör listesi",
