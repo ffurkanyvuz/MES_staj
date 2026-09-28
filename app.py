@@ -45,7 +45,9 @@ def runtime_setting(name, default=""):
 DATABASE_URL = runtime_setting("DATABASE_URL")
 USING_POSTGRES = bool(DATABASE_URL)
 POSTGRES_CONNECTION_CACHE_VERSION = "autocommit-v2"
-API_URL = runtime_setting("API_URL", "http://127.0.0.1:8000").rstrip("/")
+CONFIGURED_API_URL = runtime_setting("API_URL")
+API_CONFIGURED = bool(CONFIGURED_API_URL)
+API_URL = (CONFIGURED_API_URL or "http://127.0.0.1:8000").rstrip("/")
 TREX_API_KEY = runtime_setting("TREX_API_KEY")
 PUBLIC_APP_URL = runtime_setting(
     "PUBLIC_APP_URL",
@@ -200,7 +202,7 @@ def _read_query(sql, params=()):
         c.close()
 
 
-@st.cache_data(ttl=10, max_entries=256, show_spinner=False)
+@st.cache_data(ttl=60, max_entries=512, show_spinner=False)
 def _cached_read(sql, params, database_identity):
     return _read_query(sql, params)
 
@@ -1148,7 +1150,7 @@ def verify_password(password, stored_hash):
         return False
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def default_password_accounts():
     defaults = {
         "admin": "Admin123!",
@@ -1214,9 +1216,6 @@ NAV_LABELS = {
 }
 
 
-_permission_cache = {}
-
-
 def can_access_module(module):
     """Rol varsayılanlarını veya kullanıcıya özel modül yetkilerini uygular."""
     if module == "🎯 Yönetici Merkezi":
@@ -1226,9 +1225,10 @@ def can_access_module(module):
     if role == "admin":
         return True
     if username:
-        if username not in _permission_cache:
-            _permission_cache[username] = q("SELECT module FROM user_permissions WHERE username=?", (username,))
-        custom_permissions = _permission_cache[username]
+        permission_cache = st.session_state.setdefault("permission_cache", {})
+        if username not in permission_cache:
+            permission_cache[username] = q("SELECT module FROM user_permissions WHERE username=?", (username,))
+        custom_permissions = permission_cache[username]
         custom_modules = custom_permissions["module"].tolist() if not custom_permissions.empty else []
         if "__CUSTOM__" in custom_modules:
             return module in custom_modules
@@ -1418,7 +1418,7 @@ def api_post(path):
         return None
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def api_is_alive():
     """Sekme geçişlerini bekletmemek için API durumunu kısa süre önbellekte tutar."""
     try:
@@ -2868,7 +2868,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-@st.fragment(run_every="20s")
+@st.fragment(run_every="60s")
 def notification_refresh_tick():
     """Yeni görev geldiğinde üst çubuğu kullanıcı müdahalesi olmadan yeniler."""
     # Bildirim tablosunu her Streamlit rerun'ında baştan taramak özellikle uzak
@@ -3087,8 +3087,10 @@ with st.sidebar:
         else:
             st.caption("Operatör modu: veriler salt okunur.")
 
-        if api_is_alive():
+        if API_CONFIGURED and api_is_alive():
             st.success("🟢 FastAPI aktif")
+        elif not API_CONFIGURED:
+            st.caption("FastAPI adresi tanımlı değil; doğrudan veritabanı modu kullanılıyor.")
         else:
             st.warning("🟡 FastAPI kapalı")
 
@@ -3206,7 +3208,6 @@ with st.sidebar:
                 use_container_width=True,
             ):
                 st.session_state["selected_module"] = module
-                st.rerun()
 
     selected_module = st.session_state["selected_module"]
     if not can_access_module(selected_module):
@@ -5589,11 +5590,7 @@ if selected_module == "👷 Vardiya":
 
 
 if selected_module == "✅ Kalite":
-    # Streamlit Cloud dosyaları ardışık commitlerde güncellerken eski importu
-    # bellekte tutabilir. Modülü burada yenilemek imza uyuşmazlığını önler.
-    import importlib
     import quality_panel
-    quality_panel = importlib.reload(quality_panel)
     quality_panel.render_quality_panel(q, execute, df, has_role)
     if st.session_state.pop("quality_record_created", False):
         st.success("Kalite kaydı oluşturuldu ve analizlere eklendi.")
@@ -5631,10 +5628,8 @@ if selected_module == "✅ Kalite":
 
 
 if selected_module == "🌐 Dijital Olgunluk":
-    import importlib
     import maturity_panel
-    maturity_panel = importlib.reload(maturity_panel)
-    maturity_panel.render_maturity_panel(q, execute, using_postgres=USING_POSTGRES, api_configured=bool(API_URL))
+    maturity_panel.render_maturity_panel(q, execute, using_postgres=USING_POSTGRES, api_configured=API_CONFIGURED)
     st.stop()
 
 
@@ -5980,6 +5975,8 @@ if selected_module == "🤖 Fabrika Asistanı":
         current_username=st.session_state.get("username", ""),
         current_name=st.session_state.get("full_name", ""),
         current_role=st.session_state.get("role", "operator"),
+        using_postgres=USING_POSTGRES,
+        api_configured=API_CONFIGURED,
     )
 
 

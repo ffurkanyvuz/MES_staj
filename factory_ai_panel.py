@@ -24,6 +24,7 @@ TOOL_LABELS = {
     "compare_shifts": "Vardiya karşılaştırması",
     "compare_machines": "Makine karşılaştırması",
     "get_recent_alarms": "Alarm geçmişi",
+    "get_digital_maturity": "Dijital olgunluk değerlendirmesi",
 }
 
 
@@ -73,9 +74,11 @@ def _safe_query(query, sql, params=()):
 class MesReadTools:
     """Modelin erişebildiği sınırlı ve salt-okunur MES veri araçları."""
 
-    def __init__(self, query, role):
+    def __init__(self, query, role, *, using_postgres=False, api_configured=False):
         self.query = query
         self.role = role
+        self.using_postgres = using_postgres
+        self.api_configured = api_configured
         self.machines = _safe_query(query, """SELECT machine_code,status,production,target,planned_time,
             downtime,ideal_cycle,defective,product,operator,shift,last_maintenance,next_maintenance
             FROM machines ORDER BY machine_code""")
@@ -303,12 +306,47 @@ class MesReadTools:
             })
         return {"note": "Karşılaştırma makinelerin mevcut vardiya ataması ve anlık sayaçları üzerinden hesaplanır.", "shifts": rows}
 
+    def digital_maturity(self):
+        """Olgunluk motorunun sonucunu sohbet için kısa ve kanıtlı hale getirir."""
+        from maturity_panel import calculate_maturity
+
+        result = calculate_maturity(
+            self.query,
+            using_postgres=self.using_postgres,
+            api_configured=self.api_configured,
+        )
+        categories = sorted(
+            ({"name": row["Kategori"], "score": row["Skor"], "weight_pct": round(row["Ağırlık"] * 100)} for row in result["categories"]),
+            key=lambda item: item["score"],
+        )
+        priorities = [
+            {
+                "category": item["Kategori"],
+                "gap": item["Eksik Alan"],
+                "current": item["Mevcut"],
+                "action": item["Önerilen Aksiyon"],
+                "expected_gain": item["Beklenen Kazanç"],
+            }
+            for item in result["missing"][:6]
+        ]
+        return {
+            "overall_score": result["overall"],
+            "level": result["level_number"],
+            "level_name": result["level_name"],
+            "strongest_area": max(categories, key=lambda item: item["score"]) if categories else {},
+            "weakest_area": categories[0] if categories else {},
+            "categories": categories,
+            "priority_actions": priorities,
+            "five_why": result["five_why"],
+            "note": "Skor TREX MES içindeki gerçek kullanım ve kayıt göstergelerinden hesaplanır.",
+        }
+
     @property
     def machine_codes(self):
         return self.machines["machine_code"].dropna().astype(str).tolist() if not self.machines.empty else []
 
     def allowed_names(self):
-        common = {"get_factory_summary", "get_machine_analysis", "get_open_actions", "compare_machines", "get_recent_alarms"}
+        common = {"get_factory_summary", "get_machine_analysis", "get_open_actions", "compare_machines", "get_recent_alarms", "get_digital_maturity"}
         role_tools = {
             "admin": set(TOOL_LABELS),
             "operator": {"get_production_performance", "get_downtime_analysis", "compare_shifts"},
@@ -329,6 +367,7 @@ class MesReadTools:
             "compare_shifts": "Vardiyaları üretim, hedef gerçekleşme ve ortalama OEE ile karşılaştır.",
             "compare_machines": "İki makineyi OEE, üretim, alarm, duruş, sensör ve bakım göstergeleriyle karşılaştır.",
             "get_recent_alarms": "Belirli gün aralığındaki önemli alarmları, istenirse makine filtresiyle getir.",
+            "get_digital_maturity": "Dijital olgunluk skorunu, seviyeyi, kategori puanlarını ve puanı yükseltecek öncelikli aksiyonları getir.",
         }
         tools = []
         for name in self.allowed_names():
@@ -370,6 +409,7 @@ class MesReadTools:
             "compare_shifts": self.compare_shifts,
             "compare_machines": lambda: self.compare_machines(arguments.get("machine_a", ""), arguments.get("machine_b", "")),
             "get_recent_alarms": lambda: self.recent_alarms(arguments.get("days", 7), arguments.get("machine_code", "")),
+            "get_digital_maturity": self.digital_maturity,
         }
         return functions[name]()
 
@@ -444,6 +484,9 @@ def _ollama_context(question, tools):
     elif intent == "production" and "get_production_performance" in allowed:
         context["production"] = tools.production_performance()
         sources.append("get_production_performance")
+    elif intent == "maturity" and "get_digital_maturity" in allowed:
+        context["digital_maturity"] = tools.digital_maturity()
+        sources.append("get_digital_maturity")
     return context, list(dict.fromkeys(sources))
 
 
@@ -589,6 +632,7 @@ def _detect_intent(question, has_machine=False):
         "uretim", "hedef", "performans", "oee", "makine", "tezgah", "bakim", "ariza", "risk",
         "durus", "kayip", "bekleme", "vardiya", "aksiyon", "geciken", "kalite", "hata", "fire",
         "alarm", "sensor", "sicaklik", "titresim", "basinc", "ozet", "durum", "bugun", "neden", "karsilastir",
+        "dijital", "olgunluk", "seviye", "entegrasyon", "yetkinlik", "donusum", "artirmak", "yukseltmek",
     }
     corrected = []
     for token in tokens:
@@ -605,6 +649,7 @@ def _detect_intent(question, has_machine=False):
     if has_machine or any(phrase in text for phrase in ("bu neden", "bu niye", "neden dusuk", "ona bak", "detay")):
         return "machine"
     scores = {
+        "maturity": sum(word in text for word in ("dijital", "olgunluk", "seviye", "entegrasyon", "yetkinlik", "donusum")),
         "maintenance": sum(word in text for word in ("bakim", "ariza", "risk", "servis")),
         "downtime": sum(word in text for word in ("durus", "kayip", "bekleme", "durdu")),
         "quality": sum(word in text for word in ("kalite", "hata", "fire", "hatali", "saglam")),
@@ -642,6 +687,21 @@ def _local_answer(question, tools, history=None):
     if intent == "help":
         return ("Üretim hedefini, makine OEE’sini, duruş nedenlerini, bakım risklerini, kalite kayıplarını, vardiyaları ve açık aksiyonları inceleyebilirim. "
                 "Resmî cümle kurmana gerek yok; **‘bugün işler nasıl?’**, **‘CNC-03’e ne olmuş?’** ya da **‘en büyük kayıp nerede?’** demen yeterli.", [])
+
+    if intent == "maturity" and "get_digital_maturity" in allowed:
+        maturity = tools.digital_maturity()
+        action_lines = "\n".join(
+            f"- **{item['category']} · {item['gap']}:** {item['action']} (yaklaşık +{item['expected_gain']:.1f} puan)"
+            for item in maturity["priority_actions"][:3]
+        )
+        return (
+            f"Dijital olgunluğun şu an **{maturity['overall_score']:.1f}/100**; "
+            f"**Seviye {maturity['level']} · {maturity['level_name']}**. "
+            f"En zayıf alanın **{maturity['weakest_area'].get('name', 'Belirlenemedi')} "
+            f"(%{maturity['weakest_area'].get('score', 0):.1f})**.\n\n"
+            f"Puanı artırmak için önce şunları yap:\n{action_lines}\n\n"
+            "Bunlar genel tavsiye değil, sistemindeki eksik kayıt ve özelliklere göre sıralandı."
+        ), ["get_digital_maturity"]
 
     if intent == "comparison":
         if len(mentioned_machines) < 2:
@@ -837,7 +897,7 @@ def _render_chat_tab(tools, summary, ai_config, current_role):
             if "ollama_url_input" not in st.session_state:
                 st.session_state["ollama_url_input"] = ai_config.get("ollama_base_url", "")
             if "ollama_model_input" not in st.session_state:
-                st.session_state["ollama_model_input"] = ai_config.get("ollama_model", "qwen2.5:7b")
+                st.session_state["ollama_model_input"] = ai_config.get("ollama_model", "qwen2.5:3b")
             st.text_input("Köprü adresi", key="ollama_url_input", placeholder="https://...trycloudflare.com")
             st.text_input("Geçici bağlantı anahtarı", type="password", key="ollama_token_input")
             st.text_input("Model", key="ollama_model_input")
@@ -850,7 +910,7 @@ def _render_chat_tab(tools, summary, ai_config, current_role):
                 else:
                     st.session_state["ollama_session_url"] = address
                     st.session_state["ollama_session_token"] = token
-                    st.session_state["ollama_session_model"] = st.session_state.get("ollama_model_input", "qwen2.5:7b").strip()
+                    st.session_state["ollama_session_model"] = st.session_state.get("ollama_model_input", "qwen2.5:3b").strip()
                     _ollama_available.clear()
                     st.rerun()
             if disconnect_col.button("Bağlantıyı kaldır", key="disconnect_ollama", use_container_width=True):
@@ -965,13 +1025,13 @@ def _render_data_quality_tab(checks, confidence, summary):
         st.caption(f"Veri anı: {summary['as_of']} · {len(summary['machines'])} makine")
 
 
-def render_factory_ai(query, *, current_username="", current_name="", current_role="operator"):
+def render_factory_ai(query, *, current_username="", current_name="", current_role="operator", using_postgres=False, api_configured=False):
     api_key = _setting("OPENAI_API_KEY")
     openai_model = _setting("OPENAI_MODEL", "gpt-5-mini")
     requested_provider = _setting("AI_PROVIDER", "ollama").lower()
     ollama_base_url = st.session_state.get("ollama_session_url") or _setting("OLLAMA_BASE_URL")
     ollama_token = st.session_state.get("ollama_session_token") or _setting("OLLAMA_TOKEN")
-    ollama_model = st.session_state.get("ollama_session_model") or _setting("OLLAMA_MODEL", "qwen2.5:7b")
+    ollama_model = st.session_state.get("ollama_session_model") or _setting("OLLAMA_MODEL", "qwen2.5:3b")
     ollama_online, _ = _ollama_available(ollama_base_url, ollama_token)
     provider = "ollama" if requested_provider == "ollama" and ollama_online else "local"
     if requested_provider == "openai" and api_key:
@@ -985,7 +1045,7 @@ def render_factory_ai(query, *, current_username="", current_name="", current_ro
         "ollama_model": ollama_model,
         "ollama_configured": bool(ollama_base_url),
     }
-    tools = MesReadTools(query, current_role)
+    tools = MesReadTools(query, current_role, using_postgres=using_postgres, api_configured=api_configured)
     summary = tools.factory_summary()
     priorities, quality_checks, confidence = _management_snapshot(tools, summary)
 

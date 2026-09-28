@@ -57,7 +57,7 @@ try {
     Write-Host ""
     Write-Host "Köprü adresi: $tunnelUrl"
     Write-Host "Geçici bağlantı anahtarı: $connectionToken"
-    Write-Host "Model: qwen2.5:7b"
+    Write-Host "Model: qwen2.5:3b"
     Write-Host ""
     Write-Host "Bu pencere açık kaldığı sürece Ollama kullanılabilir. Kapatmak için Ctrl+C." -ForegroundColor Yellow
     Wait-Process -Id $tunnelProcess.Id

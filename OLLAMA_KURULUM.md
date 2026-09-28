@@ -5,7 +5,7 @@ Bu yapı OpenAI API kullanmaz. Yapay zekâ yalnızca bilgisayar, Ollama, TREX k�
 ## Bir defalık kurulum
 
 1. Ollama for Windows uygulamasını kurun.
-2. PowerShell'de modeli indirin: `ollama pull qwen2.5:7b`
+2. PowerShell'de hızlı ve dengeli modeli indirin: `ollama pull qwen2.5:3b`
 3. Cloudflared aracını kurun.
 4. Uzun ve rastgele bir köprü anahtarı oluşturun. Bu anahtarı GitHub'a yazmayın.
 
@@ -39,7 +39,7 @@ Cloudflared çıktısındaki `https://...trycloudflare.com` adresini kopyalayın
 AI_PROVIDER = "ollama"
 OLLAMA_BASE_URL = "https://...trycloudflare.com"
 OLLAMA_TOKEN = "UZUN_RASTGELE_GIZLI_ANAHTAR"
-OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_MODEL = "qwen2.5:3b"
 ```
 
 Hızlı tünel adresi her yeniden başlatmada değişebilir. Sabit adres için daha sonra Cloudflare named tunnel ve alan adı yapılandırılabilir.
