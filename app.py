@@ -1199,7 +1199,7 @@ def has_role(*roles):
 
 ROLE_MODULES = {
     "admin": None,
-    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
+    "operator": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "🧮 Manuel OEE", "👥 OLE", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
     "maintenance": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "🚨 Alarmlar", "📋 İş Emirleri", "📡 Sensörler", "⏱️ Duruşlar", "👷 Vardiya", "👥 OLE", "🧰 Bakım Talebi", "🔧 Bakım", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
     "quality": {"🏠 Ana Sayfa", "🏭 Makine", "⚡ Enerji Takibi", "📈 Üretim", "📋 İş Emirleri", "📡 Sensörler", "👷 Vardiya", "🧰 Bakım Talebi", "✅ Kalite", "🔎 Detay", "📺 Andon Ekranı", "🔳 QR Makine", "🌐 Dijital Olgunluk", "🧠 Akıllı Analiz", "🤖 Fabrika Asistanı", "🎯 Aksiyon Merkezi"},
 }
@@ -1778,6 +1778,8 @@ ensure_maturity_schema(notification_database_identity)
 ensure_five_why_schema(notification_database_identity)
 from quality_workflow_panel import ensure_quality_workflow_schema
 ensure_quality_workflow_schema(notification_database_identity, conn)
+from maintenance_tpm_panel import ensure_tpm_schema
+ensure_tpm_schema(notification_database_identity, conn)
 ensure_action_center_schema(notification_database_identity)
 
 
@@ -5647,6 +5649,16 @@ if selected_module == "🔧 Bakım":
     if st.session_state.pop("maintenance_record_updated", False):
         st.success("Bakım durumu güncellendi.")
     maintenance_records = render_maintenance_panel(q)
+    from maintenance_tpm_panel import render_tpm_center
+    render_tpm_center(
+        q,
+        execute,
+        df,
+        current_user=st.session_state.get("full_name") or st.session_state.get("username", ""),
+        can_manage=has_role("admin", "maintenance"),
+        can_operate=has_role("admin", "maintenance", "operator"),
+        notifier=create_notification,
+    )
 
     @st.dialog("Yeni Bakım Kaydı", width="large")
     def maintenance_new_dialog():

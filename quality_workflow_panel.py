@@ -481,6 +481,24 @@ def render_inspection_tasks(query, execute, current_user="", can_manage=False, n
             status = "Onaylandı" if final_result == "Uygun" else "Reddedildi"
             execute("UPDATE quality_inspection_tasks SET status=?,result=?,measured_value=?,notes=?,completed_at=?,inspector=? WHERE id=?",
                     (status, final_result, float(measured), notes.strip(), _now(), current_user, int(selected_id)))
+            source_key = str(task.get("source_key") or "")
+            if source_key.startswith("maintenance-work-order:"):
+                maintenance_work_order_id = int(source_key.rsplit(":", 1)[-1])
+                if final_result == "Uygun":
+                    execute("""UPDATE maintenance_work_orders SET status='Tamamlandı',returned_to_service_at=?,
+                        verification_status='Bekliyor' WHERE id=?""", (_now(), maintenance_work_order_id))
+                    execute("UPDATE machines SET status='Çalışıyor',last_maintenance=? WHERE machine_code=?", (date.today().isoformat(), task["machine_code"]))
+                    if notifier is not None:
+                        notifier(
+                            recipient_role="maintenance", notification_type="Devreye Alma Onayı", priority="Bilgi",
+                            title=f'{task["machine_code"]} üretime açıldı',
+                            message=f'{task["work_order"]} bakım sonrası kalite kontrolünden geçti',
+                            machine_code=task["machine_code"], target_module="🔧 Bakım",
+                            entity_type="maintenance_work_order", entity_id=maintenance_work_order_id,
+                        )
+                else:
+                    execute("UPDATE maintenance_work_orders SET status='Yeniden Açıldı',verification_status='Başarısız' WHERE id=?", (maintenance_work_order_id,))
+                    execute("UPDATE machines SET status='Arızalı' WHERE machine_code=?", (task["machine_code"],))
             if final_result == "Uygun Değil":
                 nc_id = _id()
                 execute("""INSERT INTO quality_nonconformities(id,nc_code,inspection_task_id,machine_code,product,lot_code,
